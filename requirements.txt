@@ -1,0 +1,2 @@
+aiohttp>=3.9,<4
+jmcomic>=2.7.0

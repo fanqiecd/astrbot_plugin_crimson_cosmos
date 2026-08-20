@@ -1,0 +1,142 @@
+{
+  "access_settings": {
+    "type": "object",
+    "description": "【会话权限】",
+    "hint": "控制插件可以在哪些群聊和私聊中响应。",
+    "items": {
+      "enable_group": {"type": "bool", "description": "启用群聊回复", "hint": "仅允许下方指定群聊中的关键词触发。", "default": false},
+      "allowed_group_ids": {"type": "list", "description": "允许的群号", "hint": "留空时所有群聊都不会回复。", "default": []},
+      "enable_private": {"type": "bool", "description": "启用私信回复", "default": false},
+      "admin_user_ids": {"type": "list", "description": "管理员 QQ 号", "hint": "列表中的账号不受普通色图和 JM 指令冷却限制；每项填写一个 QQ 号。", "default": []}
+    }
+  },
+  "trigger_settings": {
+    "type": "object",
+    "description": "【触发规则】",
+    "hint": "配置触发关键词、匹配方式和动态标签输入。",
+    "items": {
+      "keywords": {"type": "list", "description": "触发关键词", "hint": "任一关键词匹配时请求图片。", "default": ["色图"]},
+      "keyword_match_mode": {"type": "string", "description": "关键词匹配方式", "options": ["exact", "prefix", "contains"], "hint": "exact 为完全匹配，prefix 为以关键词开头，contains 为包含关键词。支持来三份白丝色图等请求。", "default": "exact"},
+      "cooldown_seconds": {"type": "int", "description": "获取冷却时间（秒）", "hint": "按用户和当前会话限流；填写 0 可关闭限流。", "default": 0},
+      "block_other_handlers": {"type": "bool", "description": "阻止其他插件主动回复", "hint": "关键词命中本插件后停止事件继续传播，避免 SpectreCore 或默认大模型同时回复。", "default": true}
+    }
+  },
+  "delivery_settings": {
+    "type": "object",
+    "description": "【发送与撤回】",
+    "hint": "控制 OneBot 图片消息的发送方式和发送后自动撤回。",
+    "items": {
+      "multi_image_send_mode": {"type": "string", "description": "多图发送方式", "options": ["direct", "forward"], "hint": "direct 为逐张发送；forward 为 OneBot 合并转发聊天记录，不支持时自动回退逐张发送。", "default": "direct"},
+      "single_image_forward": {"type": "bool", "description": "单张图片使用聊天记录", "hint": "开启后单张图片也通过 OneBot 合并转发发送；不支持时自动回退普通图片发送。", "default": false},
+      "auto_recall": {"type": "bool", "description": "自动撤回发送的图片", "hint": "仅对支持 OneBot 撤回接口的平台生效。", "default": false},
+      "recall_delay_seconds": {"type": "int", "description": "自动撤回延迟（秒）", "hint": "填写 0 可尽快撤回；待撤回任务会在插件重载后恢复。", "default": 60}
+    }
+  },
+  "message_settings": {
+    "type": "object",
+    "description": "【提示消息】",
+    "hint": "配置开始获取、冷却中和最终失败时发送的提示，留空可关闭对应提示。",
+    "items": {
+      "fetching_message": {"type": "string", "description": "获取中提示", "hint": "关键词匹配且数量合法后，在请求图片前发送。", "default": "正在获取喵~"},
+      "cooldown_message": {"type": "string", "description": "冷却中提示", "hint": "用户处于获取冷却时间内时发送；留空可静默拦截。", "default": "冷却中呢喵~"},
+      "failure_message": {"type": "string", "description": "获取失败提示", "hint": "所有来源重试和切换后仍失败时发送。", "default": "涩图获取失败了喵，请稍后再试~"}
+    }
+  },
+  "source_settings": {
+    "type": "object",
+    "description": "【图片来源】",
+    "hint": "选择默认来源、故障切换顺序和重试次数。",
+    "items": {
+      "image_source": {"type": "string", "description": "默认图片来源", "options": ["lolicon", "waifu_im", "nekos_api", "custom", "wallhaven"], "hint": "来源顺序留空时只使用此来源。", "default": "custom"},
+      "image_source_order": {"type": "list", "description": "图片来源尝试顺序", "options": ["lolicon", "waifu_im", "nekos_api", "custom", "wallhaven"], "hint": "当前来源重试失败后自动尝试下一个。", "default": []},
+      "request_retry_count": {"type": "int", "description": "每个来源重试次数", "hint": "允许 1 到 5 次；图片不足也会重新请求。", "default": 3}
+    }
+  },
+  "lolicon_settings": {
+    "type": "object",
+    "description": "【Lolicon 图片源】",
+    "hint": "Lolicon API 的内容、图片和标签配置。",
+    "items": {
+      "lolicon_r18_mode": {"type": "string", "description": "内容模式", "options": ["sfw", "r18", "mix"], "hint": "sfw 为全年龄，r18 为仅 R18，mix 为混合。", "default": "r18"},
+      "lolicon_exclude_ai": {"type": "bool", "description": "排除 AI 图片", "default": true},
+      "lolicon_aspect_ratio": {"type": "string", "description": "图片宽高比", "options": ["", "gt1", "lt1", "eq1"], "hint": "留空为不限；gt1 横图，lt1 竖图，eq1 方图。", "default": ""},
+      "lolicon_image_size": {"type": "string", "description": "图片尺寸", "options": ["original", "regular", "small", "thumb", "mini"], "hint": "original 原图；regular 常规尺寸；small 小尺寸（速度较快）；thumb 缩略图；mini 极小缩略图。所选尺寸不存在时会自动尝试其他可用尺寸。", "default": "small"},
+      "lolicon_proxy": {"type": "string", "description": "图片反代地址", "hint": "可选，传给 Lolicon API 用于改写返回的图片地址。", "default": ""},
+      "lolicon_proxy_order": {"type": "list", "description": "图片代理尝试顺序", "hint": "依次检测代理，超时或失败后自动尝试下一个。", "default": ["https://i.loli.best", "https://pixiv.cat", "https://i.pixiv.nl", "https://i.pixiv.re"]},
+      "lolicon_proxy_timeout_seconds": {"type": "int", "description": "单个图片代理超时（秒）", "hint": "允许 1 到 30 秒。", "default": 8},
+      "lolicon_tag_aliases": {"type": "text", "description": "标签别名", "hint": "每行或逗号分隔，格式为 白丝=white_pantyhose；输入 DeepSeek涩图 时会自动把 DeepSeek 当作标签。", "default": ""},
+      "show_pixiv_pid": {"type": "bool", "description": "回显 Pixiv PID", "hint": "在图片后发送去重后的 PID 列表。", "default": false}
+    }
+  },
+  "jable_settings": {
+    "type": "object",
+    "description": "【Jable 影片查询】",
+    "hint": "配置 /av 命令返回的影片信息。",
+    "items": {
+      "jable_show_cover": {"type": "bool", "description": "显示封面", "hint": "关闭后仅发送启用的文字信息。", "default": true},
+      "jable_show_code": {"type": "bool", "description": "显示车牌号", "default": true},
+      "jable_show_title": {"type": "bool", "description": "显示标题", "default": true},
+      "jable_show_stars": {"type": "bool", "description": "显示红星数量", "default": true},
+      "jable_show_themes": {"type": "bool", "description": "显示主题", "default": true},
+      "jable_show_detail_link": {"type": "bool", "description": "显示影片详情链接", "default": true}
+    }
+  },
+  "jm_settings": {
+    "type": "object",
+    "description": "【JM 本子】",
+    "hint": "配置 /jm 搜索、详情、热门和 ZIP 下载。",
+    "items": {
+      "jm_client_type": {"type": "string", "description": "客户端类型", "options": ["api", "html"], "hint": "api 兼容性较好；html 可能更快但更依赖网络环境。", "default": "api"},
+      "jm_cookies": {"type": "string", "description": "JM Cookies", "hint": "可选；粘贴浏览器请求中的完整 Cookie 字符串，用于访问仅登录用户可见的漫画。请勿公开。", "obvious_hint": true, "default": ""},
+      "jm_cooldown_seconds": {"type": "int", "description": "冷却时间（秒）", "hint": "按用户和当前会话限制所有 JM 指令；填写 0 可关闭限流。", "default": 0},
+      "jm_client_domain": {"type": "string", "description": "自定义域名", "hint": "多个域名使用英文逗号分隔；留空由 jmcomic 自动选择。", "default": ""},
+      "jm_retry_times": {"type": "int", "description": "请求重试次数", "hint": "0 使用 jmcomic 默认值。", "default": 0},
+      "jm_use_proxy": {"type": "bool", "description": "启用代理", "default": false},
+      "jm_proxy_url": {"type": "string", "description": "代理地址", "hint": "例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890。", "default": ""},
+      "jm_max_concurrent_photos": {"type": "int", "description": "并发章节数", "hint": "建议 3 到 5。", "default": 3},
+      "jm_max_concurrent_images": {"type": "int", "description": "并发图片数", "hint": "建议 5 到 10。", "default": 5},
+      "jm_search_page_size": {"type": "int", "description": "列表结果数量", "hint": "限制为 1 到 10。", "default": 5},
+      "jm_auto_delete_after_send": {"type": "bool", "description": "发送后自动清理", "hint": "发送 ZIP 后删除本地下载目录和压缩包。", "default": true}
+    }
+  },
+  "custom_api_settings": {
+    "type": "object",
+    "description": "【自定义 API】",
+    "hint": "配置返回图片 URL 的自定义 JSON 接口。",
+    "items": {
+      "custom_api_url": {"type": "string", "description": "接口地址", "hint": "接口需返回 JSON，图片 URL 由下方路径定位。", "default": ""},
+      "custom_api_image_url_path": {"type": "string", "description": "图片 URL 路径", "hint": "使用点号访问对象和数组，例如 data.0.urls.original。", "default": "url"},
+      "custom_api_tag_parameter": {"type": "string", "description": "标签参数名", "hint": "动态标签以英文逗号连接后传入；留空则不传标签。", "default": "tag"}
+    }
+  },
+  "wallhaven_settings": {
+    "type": "object",
+    "description": "【Wallhaven 图片源】",
+    "hint": "配置 Wallhaven 搜索凭据和筛选条件。",
+    "items": {
+      "wallhaven_api_key": {"type": "string", "description": "API Key", "hint": "成人内容请求必须使用个人 API Key。", "obvious_hint": true, "default": ""},
+      "wallhaven_categories": {"type": "list", "description": "图片分类", "options": ["通用", "动漫", "人物"], "hint": "可多选；至少保留一个分类。", "default": ["动漫"]},
+      "wallhaven_purity": {"type": "list", "description": "内容分级", "options": ["全年龄", "擦边", "成人"], "hint": "可多选；至少保留一个分级。", "default": ["成人"]},
+      "wallhaven_sorting": {"type": "string", "description": "排序方式", "options": ["最新", "热门", "榜单"], "hint": "热门按近一天榜单获取，榜单按近一个月获取。", "default": "最新"},
+      "wallhaven_tags": {"type": "list", "description": "指定标签", "hint": "每项填写一个 Tag；留空则不限制。", "default": []}
+    }
+  },
+  "waifu_im_settings": {
+    "type": "object",
+    "description": "【Waifu.im 图片源】",
+    "hint": "稳定的动漫图片源，支持内容分级、标签和方向过滤。",
+    "items": {
+      "waifu_im_nsfw_mode": {"type": "string", "description": "内容模式", "options": ["sfw", "r18", "mix"], "default": "r18"},
+      "waifu_im_excluded_tags": {"type": "list", "description": "排除标签", "hint": "填写 Waifu.im 英文标签。", "default": []},
+      "waifu_im_orientation": {"type": "string", "description": "图片方向", "options": ["", "portrait", "landscape", "square"], "hint": "留空为不限。", "default": ""}
+    }
+  },
+  "nekos_api_settings": {
+    "type": "object",
+    "description": "【Nekos API 图片源】",
+    "hint": "免费开源的动漫图片备用源。",
+    "items": {
+      "nekos_api_rating": {"type": "string", "description": "内容分级", "options": ["安全", "暗示", "边缘", "露骨"], "default": "露骨"}
+    }
+  }
+}

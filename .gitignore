@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# AstrBot runtime state and local configuration
+data/cmd_config.json
+data/plugin_data/
