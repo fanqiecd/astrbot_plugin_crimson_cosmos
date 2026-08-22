@@ -77,6 +77,7 @@ DEFAULT_CONFIG = {
     "jm_max_concurrent_images": 5,
     "jm_search_page_size": 5,
     "jm_auto_delete_after_send": True,
+    "jm_reply_as_forward": False,
     "wallhaven_api_key": "",
     "wallhaven_categories": ["动漫"],
     "wallhaven_purity": ["成人"],
@@ -145,8 +146,8 @@ class CrimsonCosmosPlugin(Star):
                 )
         self._session: aiohttp.ClientSession | None = None
         self._wallhaven_cursors: dict[tuple[str, str, str, str | None, str], int] = {}
-        self._cooldown_until: dict[tuple[str, str, str], float] = {}
-        self._jm_cooldown_until: dict[tuple[str, str, str], float] = {}
+        self._cooldown_until: dict[tuple[str, str], float] = {}
+        self._jm_cooldown_until: dict[tuple[str, str], float] = {}
         self._recall_tasks_path = (
             Path(get_astrbot_plugin_data_path())
             / "astrbot_plugin_crimson_cosmos"
@@ -296,10 +297,9 @@ class CrimsonCosmosPlugin(Star):
                 self._jm_cooldown_until = cooldowns
             cooldown_key = (
                 "private" if event.is_private_chat() else "group",
-                "private"
+                str(event.get_sender_id()).strip()
                 if event.is_private_chat()
                 else str(event.get_group_id()).strip(),
-                str(event.get_sender_id()).strip(),
             )
             now = time.monotonic()
             if now < cooldowns.get(cooldown_key, 0.0):
@@ -336,13 +336,31 @@ class CrimsonCosmosPlugin(Star):
         if image_path := result.get("image"):
             image_file = Path(str(image_path)).resolve()
             encoded_cover = base64.b64encode(image_file.read_bytes()).decode("ascii")
-            delivery_status = await self._send_image_with_auto_recall(
-                event,
-                f"base64://{encoded_cover}",
-                text,
-                failure_message="JM 获取失败，请稍后重试。",
-            )
-            if delivery_status is None:
+            image_url = f"base64://{encoded_cover}"
+            if self._config.get("jm_reply_as_forward", False):
+                # OneBot forward nodes commonly reject base64:// images; use a
+                # local file URI for the chat-record request instead.
+                image_url = image_file.as_uri()
+                delivery_status = await self._send_forward_images(
+                    event, [image_url], [text] if text else None
+                )
+                if delivery_status is False:
+                    delivery_status = await self._send_image_with_auto_recall(
+                        event,
+                        image_url,
+                        text,
+                        failure_message="JM 获取失败，请稍后重试。",
+                    )
+            else:
+                delivery_status = await self._send_image_with_auto_recall(
+                    event,
+                    image_url,
+                    text,
+                    failure_message="JM 获取失败，请稍后重试。",
+                )
+            # If OneBot direct delivery is unavailable, let AstrBot upload the
+            # local file through its normal message chain as a final fallback.
+            if delivery_status is not True:
                 yield event.chain_result(
                     [Image.fromFileSystem(str(image_file)), Plain(text)]
                 )
@@ -973,16 +991,14 @@ class CrimsonCosmosPlugin(Star):
             if not isinstance(cooldowns, dict):
                 cooldowns = {}
                 self._cooldown_until = cooldowns
-            sender_id = str(event.get_sender_id()).strip()
             conversation_id = (
                 str(event.get_group_id()).strip()
                 if not event.is_private_chat()
-                else "private"
+                else str(event.get_sender_id()).strip()
             )
             cooldown_key = (
                 "private" if event.is_private_chat() else "group",
                 conversation_id,
-                sender_id,
             )
             now = time.monotonic()
             if now < cooldowns.get(cooldown_key, 0.0):

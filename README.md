@@ -183,6 +183,7 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 | jm_max_concurrent_images | 并发图片数 | 5 |
 | jm_search_page_size | 搜索和榜单显示数量 | 5 |
 | jm_auto_delete_after_send | 发送 ZIP 后删除本地文件 | true |
+| jm_reply_as_forward | JM 封面回复使用 OneBot 合并转发聊天记录 | false |
 
 ---
 

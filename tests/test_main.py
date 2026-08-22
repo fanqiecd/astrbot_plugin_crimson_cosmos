@@ -220,6 +220,23 @@ async def collect_results(plugin: object, event: FakeEvent) -> list[tuple[str, s
     return [result async for result in plugin.on_message(event)]
 
 
+def test_should_match_the_group_access_copy_from_the_target_ui() -> None:
+    """The group access labels and hints match the requested configuration UI."""
+    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+    access_items = schema["access_settings"]["items"]
+
+    assert access_items["enable_group"]["description"] == "回复所有群聊"
+    assert (
+        access_items["enable_group"]["hint"]
+        == "开启后将回复所有群聊（黑名单中的群除外）。关闭则只回复白名单中的群。"
+    )
+    assert access_items["allowed_group_ids"]["description"] == "启用回复功能的群聊列表"
+    assert (
+        access_items["allowed_group_ids"]["hint"]
+        == "只有在这个列表中的群聊才会启用回复功能，如果为空则不启用回复功能"
+    )
+
+
 def test_should_expose_administrators_without_restoring_immediate_command() -> None:
     """Administrator IDs bypass cooldowns without restoring the removed command."""
     schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
@@ -1377,8 +1394,8 @@ def test_should_return_cooldown_message_without_fetching_again() -> None:
     assert event.stopped is True
 
 
-def test_should_allow_another_user_during_a_user_cooldown() -> None:
-    """One user's cooldown does not block another user in the same group."""
+def test_should_share_image_cooldown_between_users_in_the_same_group() -> None:
+    """One group cooldown blocks every ordinary user in that group."""
     plugin, session = make_plugin(
         {
             "enable_group": True,
@@ -1388,6 +1405,7 @@ def test_should_allow_another_user_during_a_user_cooldown() -> None:
             "custom_api_url": "https://api.example/image",
             "custom_api_image_url_path": "url",
             "cooldown_seconds": 60,
+            "cooldown_message": "冷却中呢喵~",
         },
         {"url": "https://images.example/custom.jpg"},
     )
@@ -1400,8 +1418,8 @@ def test_should_allow_another_user_during_a_user_cooldown() -> None:
     )
 
     assert first_results == [("image", "https://images.example/custom.jpg")]
-    assert second_results == [("image", "https://images.example/custom.jpg")]
-    assert len(session.calls) == 2
+    assert second_results == [("text", "冷却中呢喵~")]
+    assert len(session.calls) == 1
 
 
 def test_should_allow_configured_administrator_during_image_cooldown() -> None:
@@ -2494,7 +2512,7 @@ def test_should_send_configurable_fetching_message_before_every_jm_action() -> N
 
 
 def test_should_apply_a_separate_cooldown_to_jm_commands() -> None:
-    """JM commands share a per-user cooldown independent from image requests."""
+    """JM commands share a per-group cooldown independent from image requests."""
     plugin, _session = make_plugin(
         {
             "enable_group": True,
@@ -2510,18 +2528,19 @@ def test_should_apply_a_separate_cooldown_to_jm_commands() -> None:
     plugin._execute_jm_action = lambda action, *_args: (
         calls.append(action) or {"text": action}
     )
-    event = FakeEvent("/jm 搜索 猫")
+    first_event = FakeEvent("/jm 搜索 猫", sender_id="20001")
+    second_event = FakeEvent("/jm 详情 123", sender_id="20002")
 
     async def run_first() -> list[object]:
-        return [result async for result in plugin.jm_search(event, "猫", 1)]
+        return [result async for result in plugin.jm_search(first_event, "猫", 1)]
 
     async def run_second() -> list[object]:
-        return [result async for result in plugin.jm_info(event, "123")]
+        return [result async for result in plugin.jm_info(second_event, "123")]
 
     assert asyncio.run(run_first()) == [("text", "search")]
     assert asyncio.run(run_second()) == [("text", "JM 冷却中呢喵~")]
     assert calls == ["search"]
-    assert event.stopped is True
+    assert second_event.stopped is True
 
 
 def test_should_allow_configured_administrator_during_jm_cooldown() -> None:
@@ -2830,6 +2849,14 @@ def test_should_expose_minimal_jm_settings_and_dependency() -> None:
     items = schema["jm_settings"]["items"]
     assert items["jm_client_type"]["options"] == ["api", "html"]
     assert items["jm_cooldown_seconds"]["type"] == "int"
+    assert (
+        items["jm_cooldown_seconds"]["description"]
+        == "JM 本子冷却时间（秒）"
+    )
+    assert (
+        items["jm_cooldown_seconds"]["hint"]
+        == "群聊内所有用户共享 JM 指令冷却；私聊按用户独立冷却。填写 0 可关闭。"
+    )
     assert items["jm_cooldown_seconds"]["default"] == 0
     assert items["jm_cookies"]["default"] == ""
     assert items["jm_cookies"]["obvious_hint"] is True

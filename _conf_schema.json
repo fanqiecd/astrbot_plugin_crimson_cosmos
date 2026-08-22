@@ -4,8 +4,8 @@
     "description": "【会话权限】",
     "hint": "控制插件可以在哪些群聊和私聊中响应。",
     "items": {
-      "enable_group": {"type": "bool", "description": "启用群聊回复", "hint": "仅允许下方指定群聊中的关键词触发。", "default": false},
-      "allowed_group_ids": {"type": "list", "description": "允许的群号", "hint": "留空时所有群聊都不会回复。", "default": []},
+      "enable_group": {"type": "bool", "description": "回复所有群聊", "hint": "开启后将回复所有群聊（黑名单中的群除外）。关闭则只回复白名单中的群。", "default": false},
+      "allowed_group_ids": {"type": "list", "description": "启用回复功能的群聊列表", "hint": "只有在这个列表中的群聊才会启用回复功能，如果为空则不启用回复功能", "default": []},
       "enable_private": {"type": "bool", "description": "启用私信回复", "default": false},
       "admin_user_ids": {"type": "list", "description": "管理员 QQ 号", "hint": "列表中的账号不受普通色图和 JM 指令冷却限制；每项填写一个 QQ 号。", "default": []}
     }
@@ -88,7 +88,7 @@
     "items": {
       "jm_client_type": {"type": "string", "description": "客户端类型", "options": ["api", "html"], "hint": "api 兼容性较好；html 可能更快但更依赖网络环境。", "default": "api"},
       "jm_cookies": {"type": "string", "description": "JM Cookies", "hint": "可选；粘贴浏览器请求中的完整 Cookie 字符串，用于访问仅登录用户可见的漫画。请勿公开。", "obvious_hint": true, "default": ""},
-      "jm_cooldown_seconds": {"type": "int", "description": "冷却时间（秒）", "hint": "按用户和当前会话限制所有 JM 指令；填写 0 可关闭限流。", "default": 0},
+      "jm_cooldown_seconds": {"type": "int", "description": "JM 本子冷却时间（秒）", "hint": "群聊内所有用户共享 JM 指令冷却；私聊按用户独立冷却。填写 0 可关闭。", "default": 0},
       "jm_client_domain": {"type": "string", "description": "自定义域名", "hint": "多个域名使用英文逗号分隔；留空由 jmcomic 自动选择。", "default": ""},
       "jm_retry_times": {"type": "int", "description": "请求重试次数", "hint": "0 使用 jmcomic 默认值。", "default": 0},
       "jm_use_proxy": {"type": "bool", "description": "启用代理", "default": false},
@@ -96,7 +96,8 @@
       "jm_max_concurrent_photos": {"type": "int", "description": "并发章节数", "hint": "建议 3 到 5。", "default": 3},
       "jm_max_concurrent_images": {"type": "int", "description": "并发图片数", "hint": "建议 5 到 10。", "default": 5},
       "jm_search_page_size": {"type": "int", "description": "列表结果数量", "hint": "限制为 1 到 10。", "default": 5},
-      "jm_auto_delete_after_send": {"type": "bool", "description": "发送后自动清理", "hint": "发送 ZIP 后删除本地下载目录和压缩包。", "default": true}
+      "jm_auto_delete_after_send": {"type": "bool", "description": "发送后自动清理", "hint": "发送 ZIP 后删除本地下载目录和压缩包。", "default": true},
+      "jm_reply_as_forward": {"type": "bool", "description": "回复使用聊天记录", "hint": "开启后 JM 详情/封面通过 OneBot 合并转发聊天记录发送；不支持时自动回退普通消息。", "default": false}
     }
   },
   "custom_api_settings": {
