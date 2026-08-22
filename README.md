@@ -114,8 +114,9 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 | 配置项 | 说明 | 默认值 |
 | :--- | :--- | :--- |
 | enable_group | 启用群聊回复 | false |
-| allowed_group_ids | 允许触发插件的群号 | [] |
+| allowed_group_ids | 启用群聊回复的群号列表；留空时不回复群聊 | [] |
 | enable_private | 启用私聊回复 | false |
+| allowed_private_user_ids | 允许触发私聊回复的 QQ 号；留空允许全部 | [] |
 | keywords | 触发关键词列表 | ["色图"] |
 | keyword_match_mode | exact、prefix 或 contains | exact |
 | cooldown_seconds | 按用户和会话限制关键词获取的冷却时间，0 表示关闭 | 0 |

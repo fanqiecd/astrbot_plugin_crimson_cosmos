@@ -220,21 +220,55 @@ async def collect_results(plugin: object, event: FakeEvent) -> list[tuple[str, s
     return [result async for result in plugin.on_message(event)]
 
 
-def test_should_match_the_group_access_copy_from_the_target_ui() -> None:
-    """The group access labels and hints match the requested configuration UI."""
+def test_should_describe_group_replies_as_an_enabled_allowlist() -> None:
+    """The group access copy matches its enable-switch and allowlist behavior."""
     schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
     access_items = schema["access_settings"]["items"]
 
-    assert access_items["enable_group"]["description"] == "回复所有群聊"
+    assert access_items["enable_group"]["description"] == "启用群聊回复"
     assert (
         access_items["enable_group"]["hint"]
-        == "开启后将回复所有群聊（黑名单中的群除外）。关闭则只回复白名单中的群。"
+        == "开启后启用群聊回复；仅回复下方列表中的群聊。"
     )
-    assert access_items["allowed_group_ids"]["description"] == "启用回复功能的群聊列表"
+    assert access_items["allowed_group_ids"]["description"] == "启用群聊回复的群号列表"
     assert (
         access_items["allowed_group_ids"]["hint"]
-        == "只有在这个列表中的群聊才会启用回复功能，如果为空则不启用回复功能"
+        == "填写允许回复的群号；留空时不回复任何群聊。"
     )
+
+
+def test_should_require_the_group_switch_and_an_allowed_group_id() -> None:
+    """Group replies require both the switch and a matching group allowlist entry."""
+    cases = [
+        (False, ["10001"], "10001", False),
+        (True, ["10001", 10002], "10002", True),
+        (True, ["10001"], "99999", False),
+        (True, [], "10001", False),
+    ]
+
+    for enabled, allowed_group_ids, group_id, expected in cases:
+        plugin, _session = make_plugin(
+            {
+                "enable_group": enabled,
+                "allowed_group_ids": allowed_group_ids,
+            },
+            None,
+        )
+
+        assert (
+            plugin._is_event_allowed(FakeEvent("色图", group_id=group_id)) is expected
+        )
+
+
+def test_should_expose_a_private_reply_allowlist() -> None:
+    """The private allowlist explains that an empty list permits every user."""
+    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+    item = schema["access_settings"]["items"]["allowed_private_user_ids"]
+
+    assert item["type"] == "list"
+    assert item["description"] == "启用私信回复的 QQ 号列表"
+    assert item["hint"] == "留空时回复所有私信；填写后只回复列表中的 QQ 号。"
+    assert item["default"] == []
 
 
 def test_should_expose_administrators_without_restoring_immediate_command() -> None:
@@ -519,6 +553,40 @@ def test_should_honor_channel_switches_group_allowlist_and_keyword_modes() -> No
 
         results = asyncio.run(
             collect_results(plugin, FakeEvent(message, group_id, private))
+        )
+
+        assert bool(results) is should_reply
+        assert bool(session.calls) is should_reply
+
+
+def test_should_apply_the_private_reply_allowlist_to_keyword_requests() -> None:
+    """Private replies permit everyone by default or only configured QQ users."""
+    cases = [
+        ([], "20001", True),
+        (["20001", 20002], "20002", True),
+        (["20001"], "29999", False),
+        ("20001", "20001", False),
+    ]
+
+    for allowed_user_ids, sender_id, should_reply in cases:
+        plugin, session = make_plugin(
+            {
+                "enable_private": True,
+                "allowed_private_user_ids": allowed_user_ids,
+                "keywords": ["色图"],
+                "keyword_match_mode": "exact",
+                "image_source": "custom",
+                "custom_api_url": "https://api.example/image",
+                "custom_api_image_url_path": "url",
+            },
+            {"url": "https://images.example/custom.jpg"},
+        )
+
+        results = asyncio.run(
+            collect_results(
+                plugin,
+                FakeEvent("色图", group_id="", private=True, sender_id=sender_id),
+            )
         )
 
         assert bool(results) is should_reply
@@ -2849,10 +2917,7 @@ def test_should_expose_minimal_jm_settings_and_dependency() -> None:
     items = schema["jm_settings"]["items"]
     assert items["jm_client_type"]["options"] == ["api", "html"]
     assert items["jm_cooldown_seconds"]["type"] == "int"
-    assert (
-        items["jm_cooldown_seconds"]["description"]
-        == "JM 本子冷却时间（秒）"
-    )
+    assert items["jm_cooldown_seconds"]["description"] == "JM 本子冷却时间（秒）"
     assert (
         items["jm_cooldown_seconds"]["hint"]
         == "群聊内所有用户共享 JM 指令冷却；私聊按用户独立冷却。填写 0 可关闭。"

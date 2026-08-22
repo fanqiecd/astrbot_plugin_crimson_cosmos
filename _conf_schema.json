@@ -4,9 +4,10 @@
     "description": "【会话权限】",
     "hint": "控制插件可以在哪些群聊和私聊中响应。",
     "items": {
-      "enable_group": {"type": "bool", "description": "回复所有群聊", "hint": "开启后将回复所有群聊（黑名单中的群除外）。关闭则只回复白名单中的群。", "default": false},
-      "allowed_group_ids": {"type": "list", "description": "启用回复功能的群聊列表", "hint": "只有在这个列表中的群聊才会启用回复功能，如果为空则不启用回复功能", "default": []},
+      "enable_group": {"type": "bool", "description": "启用群聊回复", "hint": "开启后启用群聊回复；仅回复下方列表中的群聊。", "default": false},
+      "allowed_group_ids": {"type": "list", "description": "启用群聊回复的群号列表", "hint": "填写允许回复的群号；留空时不回复任何群聊。", "default": []},
       "enable_private": {"type": "bool", "description": "启用私信回复", "default": false},
+      "allowed_private_user_ids": {"type": "list", "description": "启用私信回复的 QQ 号列表", "hint": "留空时回复所有私信；填写后只回复列表中的 QQ 号。", "default": []},
       "admin_user_ids": {"type": "list", "description": "管理员 QQ 号", "hint": "列表中的账号不受普通色图和 JM 指令冷却限制；每项填写一个 QQ 号。", "default": []}
     }
   },

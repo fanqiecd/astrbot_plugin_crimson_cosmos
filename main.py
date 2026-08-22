@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     "enable_group": False,
     "allowed_group_ids": [],
     "enable_private": False,
+    "allowed_private_user_ids": [],
     "admin_user_ids": [],
     "keywords": ["色图"],
     "keyword_match_mode": "exact",
@@ -181,7 +182,19 @@ class CrimsonCosmosPlugin(Star):
             Whether the current session may use plugin commands.
         """
         if event.is_private_chat():
-            return bool(self._config.get("enable_private", False))
+            if not self._config.get("enable_private", False):
+                return False
+            allowed_users = self._config.get("allowed_private_user_ids", [])
+            if not isinstance(allowed_users, list):
+                return False
+            if not allowed_users:
+                return True
+            sender_id = str(event.get_sender_id()).strip()
+            return sender_id in {
+                str(user_id).strip()
+                for user_id in allowed_users
+                if str(user_id).strip()
+            }
         allowed_groups = self._config.get("allowed_group_ids", [])
         return (
             bool(self._config.get("enable_group", False))
@@ -670,18 +683,8 @@ class CrimsonCosmosPlugin(Star):
         self, event: AstrMessageEvent, message: str
     ) -> AsyncGenerator[Any, None]:
         """Handle a registered AV command with plugin access controls."""
-        if event.is_private_chat():
-            if not self._config.get("enable_private", False):
-                return
-        else:
-            allowed_groups = self._config.get("allowed_group_ids", [])
-            if (
-                not self._config.get("enable_group", False)
-                or not isinstance(allowed_groups, list)
-                or str(event.get_group_id())
-                not in {str(group_id).strip() for group_id in allowed_groups}
-            ):
-                return
+        if not self._is_event_allowed(event):
+            return
 
         block_other_handlers = self._config.get("block_other_handlers", True)
         jable_request = self._parse_jable_request(message)
@@ -947,18 +950,8 @@ class CrimsonCosmosPlugin(Star):
         if not message:
             return
 
-        if event.is_private_chat():
-            if not self._config.get("enable_private", False):
-                return
-        else:
-            allowed_groups = self._config.get("allowed_group_ids", [])
-            if (
-                not self._config.get("enable_group", False)
-                or not isinstance(allowed_groups, list)
-                or str(event.get_group_id())
-                not in {str(group_id).strip() for group_id in allowed_groups}
-            ):
-                return
+        if not self._is_event_allowed(event):
+            return
 
         block_other_handlers = self._config.get("block_other_handlers", True)
         if message.lower().startswith(("/av", "/jm")):
