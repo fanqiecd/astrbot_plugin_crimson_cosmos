@@ -2302,6 +2302,101 @@ def test_should_send_jable_ranges_as_one_forward_chat_record() -> None:
     assert all(len(node["data"]["content"]) == 2 for node in payload["messages"])
 
 
+def test_should_fetch_five_jable_details_concurrently() -> None:
+    """A ten-item range uses bounded concurrency instead of serial pairs."""
+    plugin, _session = make_plugin(
+        {
+            "enable_group": True,
+            "allowed_group_ids": ["10001"],
+            "fetching_message": "",
+            "block_other_handlers": True,
+            "auto_recall": False,
+            "jable_show_cover": False,
+        },
+        None,
+    )
+    active = 0
+    max_active = 0
+
+    async def fetch_video(request: tuple[str, int, str]) -> dict[str, object]:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        rank = request[1]
+        return {
+            "cover": f"https://images.example/{rank}.jpg",
+            "code": f"TEST-{rank:03d}",
+            "title": f"影片 {rank}",
+            "stars": str(rank * 100),
+            "tags": ["测试"],
+            "url": f"https://jable.tv/videos/test-{rank}/",
+            "rank": rank,
+            "list_name": "本月热门",
+        }
+
+    plugin._fetch_jable_video = fetch_video
+    event = FakeRecallEvent("/av 热门 本月 1-10")
+
+    async def run() -> list[object]:
+        return [
+            result
+            async for result in plugin._handle_jable_command(event, event.message)
+        ]
+
+    asyncio.run(run())
+
+    assert max_active == 5
+
+
+def test_should_bound_the_whole_jable_range_to_thirty_seconds() -> None:
+    """A range applies one command-level deadline around all ranked items."""
+    plugin, _session = make_plugin(
+        {
+            "enable_group": True,
+            "allowed_group_ids": ["10001"],
+            "fetching_message": "",
+            "block_other_handlers": True,
+            "auto_recall": False,
+            "jable_show_cover": False,
+        },
+        None,
+    )
+
+    async def fetch_video(request: tuple[str, int, str]) -> dict[str, object]:
+        rank = request[1]
+        return {
+            "cover": f"https://images.example/{rank}.jpg",
+            "code": f"TEST-{rank:03d}",
+            "title": f"影片 {rank}",
+            "stars": str(rank * 100),
+            "tags": ["测试"],
+            "url": f"https://jable.tv/videos/test-{rank}/",
+            "rank": rank,
+            "list_name": "本月热门",
+        }
+
+    plugin._fetch_jable_video = fetch_video
+    event = FakeRecallEvent("/av 热门 本月 1-10")
+    original_wait = MODULE.asyncio.wait
+    timeouts: list[float | None] = []
+
+    async def tracking_wait(tasks: object, **kwargs: object):
+        timeouts.append(kwargs.get("timeout"))
+        return await original_wait(tasks, **kwargs)
+
+    MODULE.asyncio.wait = tracking_wait
+    try:
+        asyncio.run(
+            anext(plugin._handle_jable_command(event, event.message), None)
+        )
+    finally:
+        MODULE.asyncio.wait = original_wait
+
+    assert timeouts == [30]
+
+
 def test_should_fetch_a_jable_listing_only_once_for_a_range() -> None:
     """A range reuses its listing while fetching details concurrently."""
     plugin, _session = make_plugin(
@@ -2316,13 +2411,15 @@ def test_should_fetch_a_jable_listing_only_once_for_a_range() -> None:
         None,
     )
     list_url = "https://r.jina.ai/https://jable.tv/hot/?sort_by=video_viewed_month"
-    detail_url = "https://r.jina.ai/https://jable.tv/videos/snos-361/"
-    plugin._session = RoutedSession(
-        {
-            list_url: [JABLE_LIST_MARKDOWN * 3],
-            detail_url: [JABLE_DETAIL_MARKDOWN] * 3,
-        }
-    )
+    plugin._session = FakeSession(None)
+    reads: list[str] = []
+
+    async def read_jina_text(url: str, _timeout: object) -> str:
+        reads.append(url)
+        await asyncio.sleep(0)
+        return JABLE_LIST_MARKDOWN * 3 if url == list_url else JABLE_DETAIL_MARKDOWN
+
+    plugin._read_jina_text = read_jina_text
     event = FakeRecallEvent("/av 热门 本月 1-3")
 
     async def run() -> list[object]:
@@ -2333,7 +2430,69 @@ def test_should_fetch_a_jable_listing_only_once_for_a_range() -> None:
 
     asyncio.run(run())
 
-    assert [url for url, _params in plugin._session.calls].count(list_url) == 1
+    assert reads.count(list_url) == 1
+
+
+def test_should_skip_jable_detail_when_themes_are_hidden() -> None:
+    """Disabling themes avoids the optional detail-page request entirely."""
+    plugin, _session = make_plugin({"jable_show_themes": False}, None)
+    list_url = "https://r.jina.ai/https://jable.tv/latest-updates/"
+    detail_url = "https://r.jina.ai/https://jable.tv/videos/snos-361/"
+    plugin._session = RoutedSession(
+        {
+            list_url: [JABLE_LIST_MARKDOWN],
+            detail_url: [JABLE_DETAIL_MARKDOWN],
+        }
+    )
+
+    video = asyncio.run(
+        plugin._fetch_jable_video(("https://jable.tv/latest-updates/", 1, "新片"))
+    )
+
+    assert video["tags"] == []
+    assert [url for url, _params in plugin._session.calls].count(detail_url) == 0
+
+
+def test_should_bound_jable_detail_timeout_and_retries() -> None:
+    """Optional detail metadata must not hold a command for three long attempts."""
+    plugin, _session = make_plugin({}, None)
+    list_url = "https://r.jina.ai/https://jable.tv/latest-updates/"
+    detail_url = "https://r.jina.ai/https://jable.tv/videos/snos-361/"
+
+    class TimeoutTrackingSession(RoutedSession):
+        def __init__(self, routes: dict[str, list[object]]) -> None:
+            super().__init__(routes)
+            self.timeouts: list[tuple[str, float | None]] = []
+
+        def get(self, url: str, **kwargs: object) -> FakeResponse:
+            timeout = kwargs.get("timeout")
+            self.timeouts.append((url, getattr(timeout, "total", None)))
+            return super().get(url, **kwargs)
+
+    plugin._session = TimeoutTrackingSession(
+        {
+            list_url: [JABLE_LIST_MARKDOWN],
+            detail_url: [asyncio.TimeoutError()] * 3,
+        }
+    )
+    original_sleep = MODULE.asyncio.sleep
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    MODULE.asyncio.sleep = no_sleep
+    try:
+        video = asyncio.run(
+            plugin._fetch_jable_video(
+                ("https://jable.tv/latest-updates/", 1, "新片")
+            )
+        )
+    finally:
+        MODULE.asyncio.sleep = original_sleep
+
+    detail_timeouts = [total for url, total in plugin._session.timeouts if url == detail_url]
+    assert video["tags"] == ["详情暂不可用"]
+    assert detail_timeouts == [10, 10]
 
 
 def test_should_retry_a_rate_limited_jina_request() -> None:

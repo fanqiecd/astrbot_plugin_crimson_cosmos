@@ -709,33 +709,35 @@ class CrimsonCosmosPlugin(Star):
             else [rank_request]
         )
         videos: list[dict[str, Any]] = []
-        self._jable_listing_cache: dict[str, str] = {}
-        first_result = await asyncio.gather(
-            self._fetch_jable_video((target_url, ranks[0], list_name)),
-            return_exceptions=True,
-        )
-        if isinstance(first_result[0], dict):
-            videos.append(first_result[0])
-        else:
+        listing_cache: dict[str, str | asyncio.Task[str]] = {}
+        detail_slots = asyncio.Semaphore(5)
+
+        async def fetch_rank(rank: int) -> dict[str, Any]:
+            async with detail_slots:
+                return await self._fetch_jable_video(
+                    (target_url, rank, list_name, listing_cache)
+                )
+
+        tasks = [asyncio.create_task(fetch_rank(rank)) for rank in ranks]
+        done, pending = await asyncio.wait(tasks, timeout=30)
+        if pending:
             logger.warning(
-                "[CrimsonCosmos] Jable item request failed: %s", first_result[0]
+                "[CrimsonCosmos] Jable range timed out with %d item(s) pending",
+                len(pending),
             )
-        for offset in range(1, len(ranks), 2):
-            results = await asyncio.gather(
-                *(
-                    self._fetch_jable_video((target_url, rank, list_name))
-                    for rank in ranks[offset : offset + 2]
-                ),
-                return_exceptions=True,
-            )
-            for result in results:
-                if isinstance(result, dict):
-                    videos.append(result)
-                else:
-                    logger.warning(
-                        "[CrimsonCosmos] Jable item request failed: %s", result
-                    )
-        self._jable_listing_cache.clear()
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        for task in tasks:
+            if task not in done or task.cancelled():
+                continue
+            try:
+                result = task.result()
+            except Exception as error:
+                logger.warning("[CrimsonCosmos] Jable item request failed: %s", error)
+            else:
+                videos.append(result)
+        listing_cache.clear()
         if not videos:
             logger.warning("[CrimsonCosmos] Jable request failed", exc_info=True)
             failure_message = str(self._config.get("failure_message", "") or "").strip()
@@ -1583,7 +1585,9 @@ class CrimsonCosmosPlugin(Star):
             )
         return None
 
-    async def _read_jina_text(self, url: str, timeout: aiohttp.ClientTimeout) -> str:
+    async def _read_jina_text(
+        self, url: str, timeout: aiohttp.ClientTimeout, attempts: int = 3
+    ) -> str:
         """Read a Jina page with bounded retries for temporary failures.
 
         Args:
@@ -1597,19 +1601,47 @@ class CrimsonCosmosPlugin(Star):
             aiohttp.ClientError: If all attempts fail or the error is permanent.
             asyncio.TimeoutError: If all attempts time out.
         """
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
                 async with self._session.get(url, timeout=timeout) as response:
                     response.raise_for_status()
                     return await response.text()
             except aiohttp.ClientResponseError as error:
-                if error.status not in {429, 500, 502, 503, 504} or attempt == 2:
+                if (
+                    error.status not in {429, 500, 502, 503, 504}
+                    or attempt == attempts - 1
+                ):
                     raise
             except asyncio.TimeoutError:
-                if attempt == 2:
+                if attempt == attempts - 1:
                     raise
             await asyncio.sleep(2**attempt)
-        raise ValueError("Jina Reader 请求失败。")
+
+    async def _read_cached_jable_listing(
+        self,
+        url: str,
+        timeout: aiohttp.ClientTimeout,
+        cache: dict[str, str | asyncio.Task[str]],
+    ) -> str:
+        """Share an in-flight Jable listing request across concurrent ranks."""
+        cached = cache.get(url)
+        if isinstance(cached, str):
+            return cached
+        if cached is None:
+            cached = asyncio.create_task(self._read_jina_text(url, timeout))
+            cache[url] = cached
+        try:
+            listing = await cached
+        except asyncio.CancelledError:
+            if cache.get(url) is cached:
+                cache.pop(url, None)
+            raise
+        except Exception:
+            if cache.get(url) is cached:
+                cache.pop(url, None)
+            raise
+        cache[url] = listing
+        return listing
 
     async def _read_missav_html(self, url: str) -> str:
         """Read one public MissAV page with bounded retries.
@@ -1801,7 +1833,11 @@ class CrimsonCosmosPlugin(Star):
             "magnets": magnets,
         }
 
-    async def _fetch_jable_video(self, request: tuple[str, int, str]) -> dict[str, Any]:
+    async def _fetch_jable_video(
+        self,
+        request: tuple[str, int, str]
+        | tuple[str, int, str, dict[str, str | asyncio.Task[str]]],
+    ) -> dict[str, Any]:
         """Fetch one ranked Jable video through text-reader endpoints.
 
         Args:
@@ -1815,7 +1851,8 @@ class CrimsonCosmosPlugin(Star):
         """
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
-        target_url, rank, list_name = request
+        target_url, rank, list_name = request[:3]
+        listing_cache = request[3] if len(request) == 4 else {}
         timeout = aiohttp.ClientTimeout(total=30)
         if target_url.startswith("theme:"):
             theme_request = target_url.removeprefix("theme:")
@@ -1834,11 +1871,9 @@ class CrimsonCosmosPlugin(Star):
                 target_url += f"?sort_by={sort_value}"
 
         listing_url = f"https://r.jina.ai/{target_url}"
-        listing_cache = getattr(self, "_jable_listing_cache", {})
-        listing = listing_cache.get(listing_url)
-        if listing is None:
-            listing = await self._read_jina_text(listing_url, timeout)
-            listing_cache[listing_url] = listing
+        listing = await self._read_cached_jable_listing(
+            listing_url, timeout, listing_cache
+        )
         card_pattern = re.compile(
             r"\[!\[Image[^]]*]\((?P<cover>https://[^)]+)\)[^]]*]\("
             r"(?P<url>https://jable\.tv/(?:s0/)?videos/[^)]+/)\)\s*"
@@ -1851,10 +1886,9 @@ class CrimsonCosmosPlugin(Star):
             separator = "&" if "?" in target_url else "?"
             page_parameter = "from_videos=2" if "/search/" in target_url else "from=2"
             next_page_url = f"https://r.jina.ai/{target_url}{separator}{page_parameter}"
-            next_page = listing_cache.get(next_page_url)
-            if next_page is None:
-                next_page = await self._read_jina_text(next_page_url, timeout)
-                listing_cache[next_page_url] = next_page
+            next_page = await self._read_cached_jable_listing(
+                next_page_url, timeout, listing_cache
+            )
             selected_index -= len(cards)
             cards = list(card_pattern.finditer(next_page))
         if selected_index < 0 or selected_index >= len(cards):
@@ -1870,21 +1904,26 @@ class CrimsonCosmosPlugin(Star):
             flags=re.I,
         )
         stars = card.group("metrics").split()[-1]
-        try:
-            detail = await self._read_jina_text(
-                f"https://r.jina.ai/{video_url}", timeout
-            )
-            tags = list(
-                dict.fromkeys(
-                    re.findall(
-                        r"\[([^]]+)]\(https://jable\.tv/(?:categories|tags)/",
-                        detail,
+        tags: list[str] = []
+        if self._config.get("jable_show_themes", True):
+            try:
+                detail_timeout = aiohttp.ClientTimeout(total=10)
+                detail = await self._read_jina_text(
+                    f"https://r.jina.ai/{video_url}", detail_timeout, attempts=2
+                )
+                tags = list(
+                    dict.fromkeys(
+                        re.findall(
+                            r"\[([^]]+)]\(https://jable\.tv/(?:categories|tags)/",
+                            detail,
+                        )
                     )
                 )
-            )
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            logger.warning("[CrimsonCosmos] Jable detail unavailable: %s", video_url)
-            tags = ["详情暂不可用"]
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                logger.warning(
+                    "[CrimsonCosmos] Jable detail unavailable: %s", video_url
+                )
+                tags = ["详情暂不可用"]
         cover = card.group("cover")
         if "placeholder" in cover:
             async with self._session.get(
