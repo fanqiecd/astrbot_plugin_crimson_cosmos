@@ -2841,7 +2841,15 @@ def test_should_send_jm_failure_message_when_detail_cover_delivery_fails(
     async def run() -> list[object]:
         return [result async for result in plugin.jm_info(event, "123")]
 
-    assert asyncio.run(run()) == []
+    assert asyncio.run(run()) == [
+        (
+            "chain",
+            [
+                {"type": "Image", "file": str(cover.resolve())},
+                {"type": "Plain", "text": "JM 详情"},
+            ],
+        )
+    ]
     assert event.bot.actions[0][0] == "send_group_msg"
     assert event.bot.actions[0][1]["message"] == [
         {"type": "image", "data": {"file": "base64://Y292ZXI="}},
