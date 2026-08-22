@@ -3004,7 +3004,7 @@ def test_should_send_jm_failure_message_when_detail_cover_delivery_fails(
         (
             "chain",
             [
-                {"type": "Image", "file": str(cover.resolve())},
+                {"type": "Image", "file": cover.resolve().as_uri()},
                 {"type": "Plain", "text": "JM 详情"},
             ],
         )
