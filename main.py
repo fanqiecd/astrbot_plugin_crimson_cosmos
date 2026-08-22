@@ -90,6 +90,7 @@ DEFAULT_CONFIG = {
     "single_image_forward": False,
     "fetching_message": "正在获取喵~",
     "cooldown_message": "冷却中呢喵~",
+    "group_disabled_message": "本喵暂时不提供此服务喵~",
     "failure_message": "涩图获取失败了喵，请稍后再试~",
 }
 CONFIG_GROUPS = (
@@ -950,15 +951,24 @@ class CrimsonCosmosPlugin(Star):
         if not message:
             return
 
-        if not self._is_event_allowed(event):
-            return
-
         block_other_handlers = self._config.get("block_other_handlers", True)
         if message.lower().startswith(("/av", "/jm")):
             return
 
         request = self._parse_image_request(message)
         if request is None:
+            return
+        if not self._is_event_allowed(event):
+            if not event.is_private_chat() and not self._config.get(
+                "enable_group", False
+            ):
+                group_disabled_message = str(
+                    self._config.get("group_disabled_message", "") or ""
+                ).strip()
+                if group_disabled_message:
+                    yield event.plain_result(group_disabled_message)
+                if block_other_handlers:
+                    event.stop_event()
             return
         image_count, message_tags = request
         if image_count > MAX_IMAGES_PER_REQUEST:

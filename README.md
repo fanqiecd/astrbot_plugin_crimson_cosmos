@@ -131,6 +131,7 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 | auto_recall | 自动撤回 OneBot 图片消息 | false |
 | recall_delay_seconds | 自动撤回延迟，单位秒 | 60 |
 | fetching_message | 开始获取提示，留空关闭 | 正在获取喵~ |
+| group_disabled_message | 群聊回复关闭且关键词命中时发送，留空关闭 | 本喵暂时不提供此服务喵~ |
 | cooldown_message | 冷却期间提示，留空关闭 | 冷却中呢喵~ |
 | failure_message | 最终失败提示，留空关闭 | 涩图获取失败了喵，请稍后再试~ |
 | image_source | 默认图片来源 | custom |

@@ -36,8 +36,9 @@
   "message_settings": {
     "type": "object",
     "description": "【提示消息】",
-    "hint": "配置开始获取、冷却中和最终失败时发送的提示，留空可关闭对应提示。",
+    "hint": "配置群聊关闭、开始获取、冷却中和最终失败时发送的提示，留空可关闭对应提示。",
     "items": {
+      "group_disabled_message": {"type": "string", "description": "群聊关闭提示", "hint": "群聊回复关闭且触发关键词时发送；留空可静默拦截。", "default": "本喵暂时不提供此服务喵~"},
       "fetching_message": {"type": "string", "description": "获取中提示", "hint": "关键词匹配且数量合法后，在请求图片前发送。", "default": "正在获取喵~"},
       "cooldown_message": {"type": "string", "description": "冷却中提示", "hint": "用户处于获取冷却时间内时发送；留空可静默拦截。", "default": "冷却中呢喵~"},
       "failure_message": {"type": "string", "description": "获取失败提示", "hint": "所有来源重试和切换后仍失败时发送。", "default": "涩图获取失败了喵，请稍后再试~"}

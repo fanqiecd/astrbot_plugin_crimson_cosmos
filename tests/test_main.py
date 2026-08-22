@@ -559,6 +559,44 @@ def test_should_honor_channel_switches_group_allowlist_and_keyword_modes() -> No
         assert bool(session.calls) is should_reply
 
 
+def test_should_show_configured_notice_when_disabled_group_matches_keyword() -> None:
+    """A disabled group gets one controlled notice only after a keyword match."""
+    plugin, session = make_plugin(
+        {
+            "enable_group": False,
+            "keywords": ["色图"],
+            "keyword_match_mode": "contains",
+            "group_disabled_message": "本喵暂时不提供此服务喵~",
+            "block_other_handlers": True,
+        },
+        None,
+    )
+    matched_event = FakeEvent("此群聊里有坏银，来点色图")
+
+    matched_results = asyncio.run(collect_results(plugin, matched_event))
+    unmatched_results = asyncio.run(collect_results(plugin, FakeEvent("普通聊天")))
+    private_results = asyncio.run(
+        collect_results(plugin, FakeEvent("色图", private=True))
+    )
+
+    assert matched_results == [("text", "本喵暂时不提供此服务喵~")]
+    assert matched_event.stopped is True
+    assert unmatched_results == []
+    assert private_results == []
+    assert session.calls == []
+
+
+def test_should_expose_the_disabled_group_notice_in_message_settings() -> None:
+    """The WebUI exposes the controlled notice with the requested default copy."""
+    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+
+    field = schema["message_settings"]["items"]["group_disabled_message"]
+
+    assert field["description"] == "群聊关闭提示"
+    assert field["default"] == "本喵暂时不提供此服务喵~"
+    assert "群聊回复关闭且触发关键词时发送" in field["hint"]
+
+
 def test_should_apply_the_private_reply_allowlist_to_keyword_requests() -> None:
     """Private replies permit everyone by default or only configured QQ users."""
     cases = [
