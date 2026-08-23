@@ -197,12 +197,18 @@ class CrimsonCosmosPlugin(Star):
                 if str(user_id).strip()
             }
         allowed_groups = self._config.get("allowed_group_ids", [])
-        return (
-            bool(self._config.get("enable_group", False))
-            and isinstance(allowed_groups, list)
-            and str(event.get_group_id())
-            in {str(group_id).strip() for group_id in allowed_groups}
-        )
+        if not self._config.get("enable_group", False):
+            return False
+        if not isinstance(allowed_groups, list):
+            return False
+        normalized_groups = {
+            str(group_id).strip()
+            for group_id in allowed_groups
+            if str(group_id).strip()
+        }
+        if not normalized_groups:
+            return True
+        return str(event.get_group_id()).strip() in normalized_groups
 
     @filter.command_group("jm")
     def jm(self):

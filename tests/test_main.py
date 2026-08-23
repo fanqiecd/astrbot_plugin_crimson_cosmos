@@ -228,22 +228,22 @@ def test_should_describe_group_replies_as_an_enabled_allowlist() -> None:
     assert access_items["enable_group"]["description"] == "启用群聊回复"
     assert (
         access_items["enable_group"]["hint"]
-        == "开启后启用群聊回复；仅回复下方列表中的群聊。"
+        == "开启后启用群聊回复；列表留空时回复所有群聊。"
     )
     assert access_items["allowed_group_ids"]["description"] == "启用群聊回复的群号列表"
     assert (
         access_items["allowed_group_ids"]["hint"]
-        == "填写允许回复的群号；留空时不回复任何群聊。"
+        == "留空时回复所有群聊；填写后只回复列表中的群聊。"
     )
 
 
-def test_should_require_the_group_switch_and_an_allowed_group_id() -> None:
-    """Group replies require both the switch and a matching group allowlist entry."""
+def test_should_allow_all_groups_when_the_group_allowlist_is_empty() -> None:
+    """An enabled group channel treats an empty allowlist as unrestricted."""
     cases = [
         (False, ["10001"], "10001", False),
         (True, ["10001", 10002], "10002", True),
         (True, ["10001"], "99999", False),
-        (True, [], "10001", False),
+        (True, [], "10001", True),
     ]
 
     for enabled, allowed_group_ids, group_id, expected in cases:
