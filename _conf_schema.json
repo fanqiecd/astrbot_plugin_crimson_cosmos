@@ -16,7 +16,7 @@
     "description": "【触发规则】",
     "hint": "配置触发关键词、匹配方式和动态标签输入。",
     "items": {
-      "keywords": {"type": "list", "description": "触发关键词", "hint": "任一关键词匹配时请求图片。", "default": ["色图"]},
+      "keywords": {"type": "list", "description": "触发关键词", "hint": "任一关键词匹配时请求图片。", "default": ["色图","瑟图","涩图"]},
       "keyword_match_mode": {"type": "string", "description": "关键词匹配方式", "options": ["exact", "prefix", "contains"], "hint": "exact 为完全匹配，prefix 为以关键词开头，contains 为包含关键词。支持来三份白丝色图等请求。", "default": "exact"},
       "cooldown_seconds": {"type": "int", "description": "获取冷却时间（秒）", "hint": "按用户和当前会话限流；填写 0 可关闭限流。", "default": 0},
       "block_other_handlers": {"type": "bool", "description": "阻止其他插件主动回复", "hint": "关键词命中本插件后停止事件继续传播，避免 SpectreCore 或默认大模型同时回复。", "default": true}
