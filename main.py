@@ -1993,50 +1993,42 @@ class CrimsonCosmosPlugin(Star):
             keyword = str(keyword).strip()
             if not keyword:
                 continue
-            quantity_match = re.search(
-                rf"(?P<count>[1-9]\d*|[一二两三四五六七八九十])"
-                rf"\s*(?:张|份|个)\s*(?P<tags>.*?){re.escape(keyword)}",
-                message,
+            keyword_index = message.find(keyword)
+            if keyword_index < 0:
+                continue
+            if match_mode == "prefix" and not message.startswith(keyword):
+                continue
+
+            before = message[:keyword_index]
+            after = message[keyword_index + len(keyword) :]
+            request_match = re.match(
+                r"^\s*(?:(?:请|麻烦|劳驾)\s*)?"
+                r"(?:(?:(?:给我|帮我)\s*(?:来|发|要|整)?|发我|来|发|要|整)\s*)?"
+                r"(?P<count>[1-9]\d*|[一二两三四五六七八九十])?\s*"
+                r"(?:张|份|个)?\s*",
+                before,
             )
-            if quantity_match:
-                count_text = quantity_match.group("count")
+            count_text = request_match.group("count") if request_match else None
+            before_tags = before[request_match.end() :] if request_match else before
+            if match_mode == "exact" and not (
+                message == keyword
+                or message.startswith(f"{keyword} ")
+                or bool(count_text)
+                or (message.endswith(keyword) and bool(before_tags.strip()))
+            ):
+                continue
+            count = 1
+            if count_text:
                 count = (
                     int(count_text)
                     if count_text.isdigit()
                     else CHINESE_IMAGE_COUNTS[count_text]
                 )
-                tag_text = quantity_match.group("tags")
-                tags = [tag for tag in re.split(r"[\s,，、]+", tag_text.strip()) if tag]
-                return count, tags
-            suffix_tag_text = (
-                message[: -len(keyword)].strip() if message.endswith(keyword) else ""
+            tag_text = " ".join(
+                part for part in (before_tags.strip(), after.strip()) if part
             )
-            suffix_keyword_match = (
-                match_mode == "exact"
-                and bool(suffix_tag_text)
-                and not re.fullmatch(
-                    r"(?:请|来|要|给我|发我)*\s*"
-                    r"(?:[1-9]\d*|[一二两三四五六七八九十])?\s*"
-                    r"(?:张|份|个)?",
-                    suffix_tag_text,
-                )
-            )
-            if (
-                (
-                    match_mode == "exact"
-                    and (message == keyword or message.startswith(f"{keyword} "))
-                )
-                or suffix_keyword_match
-                or (match_mode == "prefix" and message.startswith(keyword))
-                or (match_mode == "contains" and keyword in message)
-            ):
-                tag_text = message.replace(keyword, " ", 1)
-                tags = [
-                    tag
-                    for tag in re.split(r"[\s,，、]+", tag_text.strip())
-                    if tag and tag not in {"来", "请", "一张", "一份"}
-                ]
-                return 1, tags
+            tags = [tag for tag in re.split(r"[\s,，、]+", tag_text) if tag]
+            return count, tags
         return None
 
     async def _fetch_custom_image(self, tags: list[str] | None = None) -> str:

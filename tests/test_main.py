@@ -10,6 +10,8 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "crimson_cosmos_plugin", PLUGIN_ROOT / "main.py"
@@ -1004,6 +1006,41 @@ def test_should_accept_tags_written_after_the_keyword() -> None:
 
     assert results == [("image", "https://images.example/tagged.jpg")]
     assert session.calls == [("https://api.example/image", {"tags": "白丝,猫耳"})]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_params"),
+    [
+        ("来个色图", None),
+        ("请给我来一张色图", None),
+        ("发我一张色图", None),
+        ("来个白丝色图", {"tags": "白丝"}),
+        ("给我发一张白丝、猫耳色图", {"tags": "白丝,猫耳"}),
+        ("色图 白丝 猫耳", {"tags": "白丝,猫耳"}),
+    ],
+)
+def test_should_parse_request_phrases_separately_from_image_tags(
+    message: str, expected_params: dict[str, str] | None
+) -> None:
+    """Request grammar is consumed before the remaining text becomes tags."""
+    plugin, session = make_plugin(
+        {
+            "enable_group": True,
+            "allowed_group_ids": ["10001"],
+            "keywords": ["色图"],
+            "keyword_match_mode": "contains",
+            "image_source": "custom",
+            "custom_api_url": "https://api.example/image",
+            "custom_api_image_url_path": "url",
+            "custom_api_tag_parameter": "tags",
+        },
+        {"url": "https://images.example/tagged.jpg"},
+    )
+
+    results = asyncio.run(collect_results(plugin, FakeEvent(message)))
+
+    assert results == [("image", "https://images.example/tagged.jpg")]
+    assert session.calls == [("https://api.example/image", expected_params)]
 
 
 def test_should_expose_resilience_settings_in_the_config_schema() -> None:
