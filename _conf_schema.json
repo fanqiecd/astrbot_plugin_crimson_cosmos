@@ -88,7 +88,8 @@
       "jable_show_title": {"type": "bool", "description": "显示标题", "default": true},
       "jable_show_stars": {"type": "bool", "description": "显示红星数量", "default": true},
       "jable_show_themes": {"type": "bool", "description": "显示主题", "default": true},
-      "jable_show_detail_link": {"type": "bool", "description": "显示影片详情链接", "default": true}
+      "jable_show_detail_link": {"type": "bool", "description": "显示影片详情链接", "default": true},
+      "jina_api_key": {"type": "string", "description": "Jina Reader API Key", "hint": "可选；到 jina.ai 免费申请，用于提升 r.jina.ai 的速率上限（匿名约 20 次/分钟，带 Key 更高且优先）。请勿公开。", "obvious_hint": true, "default": ""}
     }
   },
   "jm_settings": {

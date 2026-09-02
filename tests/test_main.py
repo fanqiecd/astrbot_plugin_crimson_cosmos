@@ -1224,11 +1224,12 @@ def test_should_fall_back_to_the_next_pixiv_image_proxy() -> None:
         *,
         params: dict[str, str] | None = None,
         timeout: object = None,
+        headers: dict[str, str] | None = None,
     ) -> FakeResponse:
         attempted_urls.append(url)
         if url.startswith("https://i.loli.best/"):
             raise MODULE.aiohttp.ClientError("primary proxy unavailable")
-        return original_get(url, params=params, timeout=timeout)
+        return original_get(url, params=params, timeout=timeout, headers=headers)
 
     session.get = get_with_failed_primary
 
@@ -2387,7 +2388,7 @@ def test_should_fetch_five_jable_details_concurrently() -> None:
     assert max_active == 5
 
 
-def test_should_bound_the_whole_jable_range_to_thirty_seconds() -> None:
+def test_should_bound_the_whole_jable_range_to_sixty_seconds() -> None:
     """A range applies one command-level deadline around all ranked items."""
     plugin, _session = make_plugin(
         {
@@ -2431,7 +2432,7 @@ def test_should_bound_the_whole_jable_range_to_thirty_seconds() -> None:
     finally:
         MODULE.asyncio.wait = original_wait
 
-    assert timeouts == [30]
+    assert timeouts == [60]
 
 
 def test_should_fetch_a_jable_listing_only_once_for_a_range() -> None:
@@ -2607,8 +2608,14 @@ def test_should_expose_jable_settings_in_a_separate_config_card() -> None:
         "jable_show_stars",
         "jable_show_themes",
         "jable_show_detail_link",
+        "jina_api_key",
     }
-    assert all(setting["default"] is True for setting in settings.values())
+    assert all(
+        settings[name]["default"] is True
+        for name in settings
+        if name.startswith("jable_show_")
+    )
+    assert settings["jina_api_key"]["default"] == ""
 
 
 def test_should_control_each_jable_report_field_independently() -> None:

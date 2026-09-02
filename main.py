@@ -61,7 +61,7 @@ DEFAULT_CONFIG = {
         "https://i.pixiv.nl",
         "https://i.pixiv.re",
     ],
-    "lolicon_proxy_timeout_seconds": 8,
+    "lolicon_proxy_timeout_seconds": 12,
     "lolicon_tag_aliases": "",
     "show_pixiv_pid": False,
     "jable_show_cover": True,
@@ -70,6 +70,7 @@ DEFAULT_CONFIG = {
     "jable_show_stars": True,
     "jable_show_themes": True,
     "jable_show_detail_link": True,
+    "jina_api_key": "",
     "jm_client_type": "api",
     "jm_cookies": "",
     "jm_cooldown_seconds": 0,
@@ -1075,7 +1076,7 @@ class CrimsonCosmosPlugin(Star):
                 )
 
         tasks = [asyncio.create_task(fetch_rank(rank)) for rank in ranks]
-        done, pending = await asyncio.wait(tasks, timeout=30)
+        done, pending = await asyncio.wait(tasks, timeout=60)
         if pending:
             logger.warning(
                 "[CrimsonCosmos] Jable range timed out with %d item(s) pending",
@@ -1095,7 +1096,7 @@ class CrimsonCosmosPlugin(Star):
                 videos.append(result)
         listing_cache.clear()
         if not videos:
-            logger.warning("[CrimsonCosmos] Jable request failed", exc_info=True)
+            logger.warning("[CrimsonCosmos] Jable request failed")
             failure_message = str(self._config.get("failure_message", "") or "").strip()
             yield event.plain_result(failure_message or "影片获取失败，请稍后重试。")
             if block_other_handlers:
@@ -1991,6 +1992,7 @@ class CrimsonCosmosPlugin(Star):
         Args:
             url: Full Jina Reader URL.
             timeout: Per-attempt HTTP timeout.
+            attempts: Maximum number of attempts.
 
         Returns:
             Markdown response text.
@@ -1999,9 +2001,15 @@ class CrimsonCosmosPlugin(Star):
             aiohttp.ClientError: If all attempts fail or the error is permanent.
             asyncio.TimeoutError: If all attempts time out.
         """
+        headers: dict[str, str] = {}
+        api_key = str(self._config.get("jina_api_key", "") or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         for attempt in range(attempts):
             try:
-                async with self._session.get(url, timeout=timeout) as response:
+                async with self._session.get(
+                    url, headers=headers, timeout=timeout
+                ) as response:
                     response.raise_for_status()
                     return await response.text()
             except aiohttp.ClientResponseError as error:
@@ -2010,6 +2018,9 @@ class CrimsonCosmosPlugin(Star):
                     or attempt == attempts - 1
                 ):
                     raise
+                delay = 4 * (2**attempt) if error.status == 429 else 2**attempt
+                await asyncio.sleep(delay)
+                continue
             except asyncio.TimeoutError:
                 if attempt == attempts - 1:
                     raise
@@ -2870,7 +2881,7 @@ class CrimsonCosmosPlugin(Star):
                             )
                         )
                     )
-            if not proxy_urls:
+            if image_url not in proxy_urls:
                 proxy_urls.append(image_url)
 
             timeout_seconds = max(
@@ -2880,10 +2891,18 @@ class CrimsonCosmosPlugin(Star):
                     30,
                 ),
             )
-            for proxy_url in proxy_urls:
+            download_headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/140 Safari/537.36"
+                ),
+                "Referer": "https://www.pixiv.net/",
+            }
+            for index, proxy_url in enumerate(proxy_urls):
                 try:
                     async with self._session.get(
                         proxy_url,
+                        headers=download_headers,
                         timeout=aiohttp.ClientTimeout(total=timeout_seconds),
                     ) as response:
                         response.raise_for_status()
@@ -2894,9 +2913,11 @@ class CrimsonCosmosPlugin(Star):
                                 raise ValueError("Pixiv 图片超过 20 MiB 限制。")
                         resolved_image = bytes(image_buffer)
                         if not resolved_image:
-                            raise ValueError("Pixiv 图片代理返回空内容。")
+                            raise ValueError("Pixiv 图片返回空内容。")
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-                    logger.warning("Pixiv image proxy unavailable: %s", proxy_url)
+                    logger.warning("Pixiv image download failed: %s", proxy_url)
+                    if index + 1 < len(proxy_urls):
+                        await asyncio.sleep(0.4 * (index + 1))
                     continue
                 encoded = "base64://" + base64.b64encode(resolved_image).decode("ascii")
                 return (encoded, pid if pid.isdigit() else "")
