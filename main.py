@@ -861,8 +861,11 @@ class CrimsonCosmosPlugin(Star):
     async def _prepare_image_ref(self, image_ref: str) -> tuple[str, str]:
         """Return ``(kind, ref)`` after optionally bypass-processing the image.
 
-        ``kind`` is ``"image"`` or ``"file"``; ``ref`` is the original reference
-        when bypass is disabled, otherwise a processed temporary file path.
+        ``kind`` is ``"image"`` or ``"file"``. With bypass disabled ``ref`` is
+        the original reference. With bypass enabled, ``"image"`` refs are
+        inlined as ``base64://`` data so any OneBot endpoint can load them
+        regardless of host; ``"file"`` refs keep a temporary file path that is
+        converted to base64 at the OneBot send boundary.
         """
         cfg = self._bypass_config()
         if cfg is None:
@@ -875,14 +878,35 @@ class CrimsonCosmosPlugin(Star):
                 "[CrimsonCosmos] 过审处理失败，回退发送原图", exc_info=True
             )
             return ("image", image_ref)
+        as_file = cfg["mode"] in {"file", "transform_file"}
+        if not as_file:
+            return (
+                "image",
+                "base64://" + base64.b64encode(processed).decode("ascii"),
+            )
         temporary_dir = Path(get_astrbot_temp_path())
         temporary_dir.mkdir(parents=True, exist_ok=True)
         temporary_path = temporary_dir / (
             f"crimson_cosmos_bypass_{time.time_ns()}.jpg"
         )
         temporary_path.write_bytes(processed)
-        as_file = cfg["mode"] in {"file", "transform_file"}
-        return ("file" if as_file else "image", str(temporary_path.resolve()))
+        return ("file", str(temporary_path.resolve()))
+
+    async def _inline_local_file_ref(self, file_ref: str) -> str:
+        """Inline a local file as base64 so the OneBot endpoint can load it.
+
+        The OneBot protocol endpoint usually runs in a separate process or
+        container and cannot read the AstrBot temp directory, so local temp
+        files are re-encoded as ``base64://`` data. URLs and base64 data pass
+        through unchanged.
+        """
+        if file_ref.startswith(("http://", "https://", "base64://")):
+            return file_ref
+        try:
+            data = await asyncio.to_thread(Path(file_ref).read_bytes)
+        except OSError:
+            return file_ref
+        return "base64://" + base64.b64encode(data).decode("ascii")
 
     def _components_from_prepared(
         self, prepared: tuple[str, str], text: str | None = None
@@ -1543,15 +1567,16 @@ class CrimsonCosmosPlugin(Star):
             content: list[dict[str, Any]] = []
             if texts and index < len(texts):
                 content.append({"type": "text", "data": {"text": texts[index]}})
+            inline_ref = await self._inline_local_file_ref(file_ref)
             if kind == "file":
                 content.append(
                     {
                         "type": "file",
-                        "data": {"file": file_ref, "name": Path(file_ref).name},
+                        "data": {"file": inline_ref, "name": Path(file_ref).name},
                     }
                 )
             else:
-                content.append({"type": "image", "data": {"file": file_ref}})
+                content.append({"type": "image", "data": {"file": inline_ref}})
             messages.append(
                 {
                     "type": "node",
@@ -1639,15 +1664,16 @@ class CrimsonCosmosPlugin(Star):
         if prepared is None:
             prepared = await self._prepare_image_ref(image_url)
         kind, file_ref = prepared
+        inline_ref = await self._inline_local_file_ref(file_ref)
         if kind == "file":
             message: list[dict[str, Any]] = [
                 {
                     "type": "file",
-                    "data": {"file": file_ref, "name": Path(file_ref).name},
+                    "data": {"file": inline_ref, "name": Path(file_ref).name},
                 }
             ]
         else:
-            message = [{"type": "image", "data": {"file": file_ref}}]
+            message = [{"type": "image", "data": {"file": inline_ref}}]
         if text:
             message.append({"type": "text", "data": {"text": text}})
         response = None
@@ -1659,11 +1685,11 @@ class CrimsonCosmosPlugin(Star):
                 **routing_params,
             )
         except Exception:
-            if file_ref.startswith("base64://"):
+            if kind == "image" and inline_ref.startswith("base64://"):
                 temporary_image: Path | None = None
                 try:
                     image_bytes = base64.b64decode(
-                        file_ref.removeprefix("base64://"), validate=True
+                        inline_ref.removeprefix("base64://"), validate=True
                     )
                     suffix = (
                         ".png"
