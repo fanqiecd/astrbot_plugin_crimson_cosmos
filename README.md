@@ -4,7 +4,7 @@
 
 <i>支持多图片源、动态标签、故障切换与自动撤回的 AstrBot 图片插件。</i>
 
-![Version](https://img.shields.io/badge/version-v0.2.0-blue)
+![Version](https://img.shields.io/badge/version-v0.3.3-blue)
 
 </div>
 
@@ -23,6 +23,7 @@ astrbot_plugin_crimson_cosmos 会在指定群聊或私聊中监听关键词，�
 - 🎨 **多图片源** - 支持 Lolicon、Wallhaven 和自定义 JSON API。
 - 🏷️ **动态标签** - 从消息中提取标签，并支持 Lolicon 标签别名。
 - 🔢 **多图请求** - 支持中文或阿拉伯数字，单次最多 5 张。
+- ⚡ **并发获取** - 多图请求、来源拉取、代理下载与过审处理均并行执行，降低延迟。
 - 🔄 **故障切换** - 来源请求失败后自动重试并尝试备用来源。
 - 💬 **图片发送** - 支持逐张发送、单图聊天记录和 OneBot 合并转发。
 - ⏱️ **自动撤回** - 撤回延迟可配置，任务可在插件重载后恢复。
@@ -65,7 +66,9 @@ pip install -r requirements.txt
 >
 > **行为：** 使用动态标签获取 3 张图片；超过 5 张时拒绝请求。
 
-Lolicon 标签别名示例：
+Lolicon 标签内置常见中文同义词（白丝、黑丝、猫耳、泳装、萝莉、女仆等），无需手动配置即可自动转换；标签会展开为「同义 OR」请求，并在无结果时自动回退为无标签请求，避免拿不到图。
+
+如需覆盖内置转换或添加自定义标签，再配置别名，格式为每行 `别名=目标标签`：
 
 ~~~text
 白丝=white_pantyhose
@@ -73,7 +76,7 @@ Lolicon 标签别名示例：
 DeepSeek=deepseek
 ~~~
 
-配置别名后，可直接输入 `DeepSeek涩图`，插件会自动提取并转换标签。
+配置别名后，可直接输入 `DeepSeek涩图`，插件会自动提取并转换标签；自定义别名优先于内置同义词。
 
 Jable 查询示例：
 
@@ -138,6 +141,23 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 | image_source_order | 图片来源故障切换顺序 | [] |
 | request_retry_count | 每个来源的重试次数 | 3 |
 
+### 过审处理（反拦截）
+
+发送前下载原图并加扰动重新编码，改变图片指纹并干扰内容识别，用于降低图片被平台服务器层拦截的概率。需安装 Pillow（`pip install -r requirements.txt`）。
+
+| 配置项 | 说明 | 默认值 |
+| :--- | :--- | :--- |
+| bypass_mode | off 关闭；transform 扰动后按图片发送；file 扰动后按文件发送；transform_file 扰动并按文件发送 | transform |
+| bypass_noise | 随机像素噪点强度，破坏图片指纹 | 8 |
+| bypass_rotate | 随机旋转角度上限（度），破坏对齐类检测 | 1.0 |
+| bypass_flip | 以 50% 概率水平镜像 | true |
+| bypass_resize_ratio | 随机微缩放比例，破坏精确哈希（1.00 关闭） | 0.98 |
+| bypass_jpeg_quality | JPEG 重编码质量，引入压缩噪声 | 90 |
+| bypass_hue_shift | 色相偏移（度），偏移肤色检测（0 关闭） | 0 |
+| bypass_brightness | 亮度抖动（1.00 关闭） | 1.0 |
+
+处理失败时会自动回退发送原图，不会导致图片丢失。
+
 ### Lolicon
 
 | 配置项 | 说明 | 默认值 |
@@ -149,7 +169,7 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 | lolicon_proxy | 图片反代地址 | 空 |
 | lolicon_proxy_order | 图片代理尝试顺序，失败自动切换 | i.loli.best、pixiv.cat、i.pixiv.nl、i.pixiv.re |
 | lolicon_proxy_timeout_seconds | 单个图片代理超时秒数 | 8 |
-| lolicon_tag_aliases | 标签别名映射 | 空 |
+| lolicon_tag_aliases | 自定义标签别名（覆盖内置同义词），留空使用内置常见标签转换 | 空 |
 | show_pixiv_pid | 回显 Pixiv PID | false |
 
 ### 自定义 API 与 Wallhaven
@@ -186,6 +206,19 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 | jm_search_page_size | 搜索和榜单显示数量 | 5 |
 | jm_auto_delete_after_send | 发送 ZIP 后删除本地文件 | true |
 | jm_reply_as_forward | JM 封面回复使用 OneBot 合并转发聊天记录 | false |
+
+---
+
+## ⚡ 性能基准
+
+多图请求、来源拉取、Lolicon 代理下载与过审处理均已并行化。以下为模拟单次 HTTP 往返 100ms 下的 3 张图片耗时对比（可运行 `python benchmarks/benchmark.py` 复现）：
+
+| 场景 | 串行 | 并发 | 加速比 |
+| :--- | :--- | :--- | :--- |
+| 自定义 API · 3 张 | 323.7ms | 108.3ms | ~3.0x |
+| Nekos API · 3 张 | 323.3ms | 109.1ms | ~3.0x |
+| Lolicon · 3 张下载 | 433.8ms | 219.1ms | ~2.0x |
+| 过审处理 · 3 张 | 645.6ms | 303.9ms | ~2.1x |
 
 ---
 

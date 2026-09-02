@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import importlib
+import io
 import json
+import random
 import re
 import shutil
 import time
 import zipfile
 from collections.abc import AsyncGenerator
 from html import unescape
+from itertools import product
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -86,6 +89,14 @@ DEFAULT_CONFIG = {
     "wallhaven_tags": [],
     "auto_recall": False,
     "recall_delay_seconds": 60,
+    "bypass_mode": "transform",
+    "bypass_noise": 8,
+    "bypass_rotate": 1.0,
+    "bypass_flip": True,
+    "bypass_resize_ratio": 0.98,
+    "bypass_jpeg_quality": 90,
+    "bypass_hue_shift": 0,
+    "bypass_brightness": 1.0,
     "multi_image_send_mode": "direct",
     "single_image_forward": False,
     "fetching_message": "正在获取喵~",
@@ -122,6 +133,121 @@ CHINESE_IMAGE_COUNTS = {
 }
 MAX_IMAGES_PER_REQUEST = 5  # ponytail: fixed cap; make configurable if needed.
 MAX_MISSAV_MAGNETS = 5  # ponytail: fixed chat-safe cap; add ranges if requested.
+MAX_LOLICON_TAG_GROUPS = 8  # 标签组合上限，避免同义展开后请求体过大。
+
+# 常见中文标签 → Lolicon 候选标签（同义候选为 OR 关系，命中任意一个即可）。
+# 错误的候选不会拖累结果：Lolicon 的多组标签按 OR 匹配。
+LOLICON_TAG_ALIASES: dict[str, tuple[str, ...]] = {
+    # 袜类 / 绝对领域
+    "白丝": ("白丝", "白タイツ", "白色连裤袜"),
+    "白色丝袜": ("白丝", "白タイツ"),
+    "白丝袜": ("白丝", "白タイツ"),
+    "黑丝": ("黑丝", "黑タイツ", "黑色连裤袜"),
+    "黑色丝袜": ("黑丝", "黑タイツ"),
+    "黑丝袜": ("黑丝", "黑タイツ"),
+    "丝袜": ("丝袜", "连裤袜", "裤袜"),
+    "连裤袜": ("连裤袜", "丝袜"),
+    "裤袜": ("裤袜", "丝袜"),
+    "吊带袜": ("吊带袜",),
+    "过膝袜": ("过膝袜", "膝上袜"),
+    "膝上袜": ("膝上袜", "过膝袜"),
+    "绝对领域": ("绝对领域",),
+    "网袜": ("网袜", "渔网袜", "网眼袜"),
+    "渔网袜": ("渔网袜", "网袜"),
+    "网眼袜": ("网眼袜", "网袜"),
+    "大腿袜": ("大腿袜",),
+    # 兽耳 / 拟人特征
+    "猫耳": ("猫耳", "猫娘", "猫耳娘"),
+    "猫娘": ("猫娘", "猫耳"),
+    "猫耳娘": ("猫耳娘", "猫耳"),
+    "兔耳": ("兔耳", "兔娘"),
+    "兔娘": ("兔娘", "兔耳"),
+    "兔女郎": ("兔女郎",),
+    "狐耳": ("狐耳", "狐狸"),
+    "狐狸": ("狐狸", "狐耳"),
+    "兽耳": ("兽耳",),
+    "犬耳": ("犬耳",),
+    "女仆": ("女仆", "女仆装"),
+    "女仆装": ("女仆装", "女仆"),
+    "巫女": ("巫女",),
+    "修女": ("修女", "修女服"),
+    "修女服": ("修女服", "修女"),
+    "双马尾": ("双马尾",),
+    "马尾": ("马尾", "单马尾"),
+    "单马尾": ("单马尾", "马尾"),
+    "长发": ("长发",),
+    "黑长直": ("黑长直",),
+    "短发": ("短发",),
+    # 发色
+    "金发": ("金发",),
+    "银发": ("银发",),
+    "白发": ("白发",),
+    "粉发": ("粉发",),
+    "蓝发": ("蓝发",),
+    "绿发": ("绿发",),
+    "红发": ("红发",),
+    "紫发": ("紫发",),
+    "黑发": ("黑发",),
+    "棕发": ("棕发",),
+    # 服装
+    "泳装": ("泳装", "泳衣", "水着"),
+    "泳衣": ("泳衣", "泳装"),
+    "水着": ("水着", "泳装"),
+    "比基尼": ("比基尼",),
+    "死库水": ("死库水", "学校泳装"),
+    "学校泳装": ("学校泳装", "死库水"),
+    "连体泳装": ("连体泳装",),
+    "水手服": ("水手服",),
+    "jk": ("水手服", "校服"),
+    "校服": ("校服", "学生服"),
+    "学生服": ("学生服", "校服"),
+    "制服": ("制服",),
+    "和服": ("和服",),
+    "浴衣": ("浴衣",),
+    "旗袍": ("旗袍",),
+    "体操服": ("体操服", "布鲁马"),
+    "布鲁马": ("布鲁马", "体操服"),
+    "运动服": ("运动服",),
+    "内衣": ("内衣",),
+    "情趣内衣": ("情趣内衣",),
+    "蕾丝": ("蕾丝", "蕾丝内衣"),
+    "蕾丝内衣": ("蕾丝内衣", "蕾丝"),
+    "胸罩": ("胸罩",),
+    "内裤": ("内裤", "胖次"),
+    "胖次": ("胖次", "内裤"),
+    "丁字裤": ("丁字裤",),
+    "裸体": ("裸体", "全裸"),
+    "全裸": ("全裸", "裸体"),
+    # 体型 / 角色
+    "萝莉": ("萝莉",),
+    "loli": ("萝莉",),
+    "少女": ("少女",),
+    "御姐": ("御姐",),
+    "巨乳": ("巨乳",),
+    "贫乳": ("贫乳",),
+    "爆乳": ("爆乳",),
+    "伪娘": ("伪娘",),
+    "扶她": ("扶她",),
+    "futa": ("扶她",),
+    "眼镜": ("眼镜", "眼镜娘"),
+    "眼镜娘": ("眼镜娘", "眼镜"),
+    # 玩法 / 内容
+    "捆绑": ("捆绑", "束缚"),
+    "束缚": ("束缚", "捆绑"),
+    "触手": ("触手",),
+    "足交": ("足交",),
+    "口交": ("口交",),
+    "中出": ("中出",),
+    "露出": ("露出",),
+    "痴女": ("痴女",),
+    "调教": ("调教",),
+    "自慰": ("自慰",),
+    "手交": ("手交",),
+    "肛交": ("肛交",),
+    "妊娠": ("妊娠",),
+    "母乳": ("母乳",),
+    "母乳喂养": ("母乳",),
+}
 
 
 class CrimsonCosmosPlugin(Star):
@@ -582,6 +708,206 @@ class CrimsonCosmosPlugin(Star):
 
         raise ValueError(f"Unknown JM action: {action}")
 
+    # ------------------------------------------------------------------ #
+    # 过审（反拦截）处理：发送前下载原图、加扰动并重新编码，改变图片指纹
+    # 并干扰内容识别；也可改为以文件消息发送，走相对宽松的审核通道。
+    # ------------------------------------------------------------------ #
+
+    def _bypass_config(self) -> dict[str, Any] | None:
+        """Return normalized bypass parameters, or ``None`` when disabled."""
+        mode = str(self._config.get("bypass_mode", "off") or "off").strip().lower()
+        if mode not in {"transform", "file", "transform_file"}:
+            return None
+        try:
+            noise = max(0, min(64, int(self._config.get("bypass_noise", 8) or 0)))
+        except (TypeError, ValueError):
+            noise = 8
+        try:
+            rotate = max(
+                0.0, min(12.0, float(self._config.get("bypass_rotate", 1.0) or 0))
+            )
+        except (TypeError, ValueError):
+            rotate = 1.0
+        try:
+            resize_ratio = max(
+                0.70,
+                min(1.0, float(self._config.get("bypass_resize_ratio", 0.98) or 1)),
+            )
+        except (TypeError, ValueError):
+            resize_ratio = 1.0
+        try:
+            jpeg_quality = max(
+                50, min(100, int(self._config.get("bypass_jpeg_quality", 90) or 90))
+            )
+        except (TypeError, ValueError):
+            jpeg_quality = 90
+        try:
+            hue_shift = max(
+                -45, min(45, int(self._config.get("bypass_hue_shift", 0) or 0))
+            )
+        except (TypeError, ValueError):
+            hue_shift = 0
+        try:
+            brightness = max(
+                0.7,
+                min(1.4, float(self._config.get("bypass_brightness", 1.0) or 1.0)),
+            )
+        except (TypeError, ValueError):
+            brightness = 1.0
+        return {
+            "mode": mode,
+            "noise": noise,
+            "rotate": rotate,
+            "flip": bool(self._config.get("bypass_flip", True)),
+            "resize_ratio": resize_ratio,
+            "jpeg_quality": jpeg_quality,
+            "hue_shift": hue_shift,
+            "brightness": brightness,
+        }
+
+    def _perturb_image(self, data: bytes, cfg: dict[str, Any]) -> bytes:
+        """Apply adversarial perturbations and re-encode the image as JPEG."""
+        try:
+            from PIL import Image, ImageChops, ImageEnhance, ImageOps
+        except ImportError as error:
+            raise RuntimeError("需要安装 Pillow 以启用过审处理。") from error
+
+        resample_lanczos = getattr(
+            getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS
+        )
+        resample_bicubic = getattr(
+            getattr(Image, "Resampling", Image), "BICUBIC", Image.BICUBIC
+        )
+
+        with Image.open(io.BytesIO(data)) as opened:
+            image = ImageOps.exif_transpose(opened)
+            if image.mode == "RGBA":
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                background.paste(image, mask=image.getchannel("A"))
+                image = background
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+
+            ratio = cfg["resize_ratio"]
+            if ratio < 1.0:
+                scale = random.uniform(ratio, 1.0)
+                image = image.resize(
+                    (
+                        max(1, int(image.width * scale)),
+                        max(1, int(image.height * scale)),
+                    ),
+                    resample_lanczos,
+                )
+            if cfg["rotate"]:
+                angle = random.uniform(-cfg["rotate"], cfg["rotate"])
+                image = image.rotate(angle, resample=resample_bicubic, expand=False)
+            if cfg["flip"] and random.random() < 0.5:
+                image = ImageOps.mirror(image)
+            if cfg["hue_shift"]:
+                hue, saturation, value = image.convert("HSV").split()
+                delta = int(round(cfg["hue_shift"] / 360 * 256))
+                hue_table = [((index + delta) % 256) for index in range(256)]
+                image = Image.merge(
+                    "HSV", (hue.point(hue_table), saturation, value)
+                ).convert("RGB")
+            if cfg["brightness"] != 1.0:
+                image = ImageEnhance.Brightness(image).enhance(cfg["brightness"])
+            if cfg["noise"]:
+                sigma = float(cfg["noise"])
+                noise_image = Image.effect_noise(image.size, sigma).convert("RGB")
+                image = ImageChops.add(image, noise_image, scale=1.0, offset=-128)
+
+            output = io.BytesIO()
+            image.save(
+                output,
+                format="JPEG",
+                quality=cfg["jpeg_quality"],
+                subsampling=0,
+                optimize=True,
+            )
+            return output.getvalue()
+
+    async def _load_image_bytes(self, image_ref: str) -> bytes:
+        """Load image bytes from an inline base64 string, URL, or local path."""
+        if image_ref.startswith("base64://"):
+            return base64.b64decode(image_ref.removeprefix("base64://"), validate=True)
+        parsed = urlsplit(image_ref)
+        if parsed.scheme in {"http", "https"}:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession()
+            async with self._session.get(
+                image_ref, timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                response.raise_for_status()
+                buffer = bytearray()
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    buffer.extend(chunk)
+                    if len(buffer) > 20 * 1024 * 1024:
+                        raise ValueError("图片超过 20 MiB 限制。")
+                return bytes(buffer)
+        path_value = parsed.path
+        if parsed.scheme == "file":
+            if parsed.netloc:
+                path_value = f"//{parsed.netloc}{parsed.path}"
+            elif (
+                path_value.startswith("/")
+                and len(path_value) > 2
+                and path_value[2] == ":"
+            ):
+                # Windows file:///C:/... URI: drop the leading slash.
+                path_value = path_value[1:]
+        return Path(path_value or image_ref).read_bytes()
+
+    async def _prepare_image_ref(self, image_ref: str) -> tuple[str, str]:
+        """Return ``(kind, ref)`` after optionally bypass-processing the image.
+
+        ``kind`` is ``"image"`` or ``"file"``; ``ref`` is the original reference
+        when bypass is disabled, otherwise a processed temporary file path.
+        """
+        cfg = self._bypass_config()
+        if cfg is None:
+            return ("image", image_ref)
+        try:
+            data = await self._load_image_bytes(image_ref)
+            processed = await asyncio.to_thread(self._perturb_image, data, cfg)
+        except Exception:
+            logger.warning(
+                "[CrimsonCosmos] 过审处理失败，回退发送原图", exc_info=True
+            )
+            return ("image", image_ref)
+        temporary_dir = Path(get_astrbot_temp_path())
+        temporary_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path = temporary_dir / (
+            f"crimson_cosmos_bypass_{time.time_ns()}.jpg"
+        )
+        temporary_path.write_bytes(processed)
+        as_file = cfg["mode"] in {"file", "transform_file"}
+        return ("file" if as_file else "image", str(temporary_path.resolve()))
+
+    def _components_from_prepared(
+        self, prepared: tuple[str, str], text: str | None = None
+    ) -> list[Any]:
+        """Build AstrBot message components from a ``(kind, ref)`` pair."""
+        kind, ref = prepared
+        components: list[Any] = []
+        if kind == "file":
+            components.append(File(name=Path(ref).name, file=ref))
+        elif ref.startswith(("http://", "https://", "base64://")):
+            components.append(Image.fromURL(ref))
+        else:
+            components.append(Image.fromFileSystem(ref))
+        if text:
+            components.append(Plain(text))
+        return components
+
+    async def _build_image_components(
+        self, image_ref: str, text: str | None = None
+    ) -> list[Any]:
+        """Bypass-process an image and return ready-to-send components."""
+        return self._components_from_prepared(
+            await self._prepare_image_ref(image_ref), text
+        )
+
     async def _send_file_with_auto_recall(
         self, event: AstrMessageEvent, file_path: Path, text: str
     ) -> bool:
@@ -784,7 +1110,7 @@ class CrimsonCosmosPlugin(Star):
                 )
                 if delivery_status is None:
                     yield event.chain_result(
-                        [Image.fromURL(video["cover"]), Plain(report)]
+                        await self._build_image_components(video["cover"], report)
                     )
         elif not show_cover:
             for report in reports:
@@ -887,7 +1213,9 @@ class CrimsonCosmosPlugin(Star):
             event, video["cover"], report
         )
         if delivery_status is None:
-            yield event.chain_result([Image.fromURL(video["cover"]), Plain(report)])
+            yield event.chain_result(
+                await self._build_image_components(video["cover"], report)
+            )
         if block_other_handlers:
             event.stop_event()
 
@@ -1055,10 +1383,14 @@ class CrimsonCosmosPlugin(Star):
                             image_count, message_tags
                         )
                     elif source == "custom":
-                        image_urls = [
-                            await self._fetch_custom_image(message_tags)
-                            for _ in range(image_count)
-                        ]
+                        image_urls = list(
+                            await asyncio.gather(
+                                *(
+                                    self._fetch_custom_image(message_tags)
+                                    for _ in range(image_count)
+                                )
+                            )
+                        )
                         image_pids = []
                     elif source == "lolicon":
                         image_urls, image_pids = await self._fetch_lolicon_images(
@@ -1134,14 +1466,23 @@ class CrimsonCosmosPlugin(Star):
             delivery_failure_message = (
                 str(self._config.get("failure_message", "") or "").strip() or None
             )
-            for image_url in image_urls:
+            prepared_refs = await asyncio.gather(
+                *(self._prepare_image_ref(image_url) for image_url in image_urls)
+            )
+            for image_url, prepared in zip(image_urls, prepared_refs, strict=True):
                 delivery_status = await self._send_image_with_auto_recall(
                     event,
                     image_url,
                     failure_message=delivery_failure_message,
+                    prepared=prepared,
                 )
                 if delivery_status is None:
-                    yield event.image_result(image_url)
+                    if prepared == ("image", image_url):
+                        yield event.image_result(image_url)
+                    else:
+                        yield event.chain_result(
+                            self._components_from_prepared(prepared)
+                        )
                 elif not delivery_status:
                     all_images_delivered = False
         if pid_text and not sent_as_forward and all_images_delivered:
@@ -1194,12 +1535,23 @@ class CrimsonCosmosPlugin(Star):
             uin = int(routing_params.get("self_id", 0))
         except (TypeError, ValueError):
             uin = 0
+        prepared_refs = await asyncio.gather(
+            *(self._prepare_image_ref(image_url) for image_url in image_urls)
+        )
         messages = []
-        for index, image_url in enumerate(image_urls):
+        for index, (kind, file_ref) in enumerate(prepared_refs):
             content: list[dict[str, Any]] = []
             if texts and index < len(texts):
                 content.append({"type": "text", "data": {"text": texts[index]}})
-            content.append({"type": "image", "data": {"file": image_url}})
+            if kind == "file":
+                content.append(
+                    {
+                        "type": "file",
+                        "data": {"file": file_ref, "name": Path(file_ref).name},
+                    }
+                )
+            else:
+                content.append({"type": "image", "data": {"file": file_ref}})
             messages.append(
                 {
                     "type": "node",
@@ -1241,6 +1593,7 @@ class CrimsonCosmosPlugin(Star):
         text: str | None = None,
         *,
         failure_message: str | None = None,
+        prepared: tuple[str, str] | None = None,
     ) -> bool | None:
         """Send an image through OneBot and schedule a recall when enabled.
 
@@ -1249,6 +1602,8 @@ class CrimsonCosmosPlugin(Star):
             image_url: Remote image URL to send.
             text: Optional text sent in the same recallable message.
             failure_message: Optional plain text to send when direct delivery fails.
+            prepared: Optional precomputed ``(kind, ref)`` from ``_prepare_image_ref``
+                to avoid re-processing the image.
 
         Returns:
             ``True`` when the image was sent, ``False`` when delivery failed after
@@ -1281,7 +1636,18 @@ class CrimsonCosmosPlugin(Star):
             action = "send_group_msg"
             recipient = {"group_id": int(group_id)}
 
-        message: list[dict[str, Any]] = [{"type": "image", "data": {"file": image_url}}]
+        if prepared is None:
+            prepared = await self._prepare_image_ref(image_url)
+        kind, file_ref = prepared
+        if kind == "file":
+            message: list[dict[str, Any]] = [
+                {
+                    "type": "file",
+                    "data": {"file": file_ref, "name": Path(file_ref).name},
+                }
+            ]
+        else:
+            message = [{"type": "image", "data": {"file": file_ref}}]
         if text:
             message.append({"type": "text", "data": {"text": text}})
         response = None
@@ -1293,11 +1659,11 @@ class CrimsonCosmosPlugin(Star):
                 **routing_params,
             )
         except Exception:
-            if image_url.startswith("base64://"):
+            if file_ref.startswith("base64://"):
                 temporary_image: Path | None = None
                 try:
                     image_bytes = base64.b64decode(
-                        image_url.removeprefix("base64://"), validate=True
+                        file_ref.removeprefix("base64://"), validate=True
                     )
                     suffix = (
                         ".png"
@@ -2161,8 +2527,7 @@ class CrimsonCosmosPlugin(Star):
         params: dict[str, Any] = {"rating": rating}
         if message_tags:
             params["tag"] = message_tags[:5]
-        urls = []
-        for _ in range(count):
+        async def fetch_one() -> str:
             async with self._session.get(
                 "https://api.nekosapi.com/v5/images/random",
                 params=params,
@@ -2175,8 +2540,9 @@ class CrimsonCosmosPlugin(Star):
                 ("http://", "https://")
             ):
                 raise ValueError("Nekos API 未返回有效的图片链接。")
-            urls.append(image_url)
-        return urls
+            return image_url
+
+        return list(await asyncio.gather(*(fetch_one() for _ in range(count))))
 
     async def _fetch_wallhaven_images(
         self, count: int, message_tags: list[str] | None = None
@@ -2292,6 +2658,84 @@ class CrimsonCosmosPlugin(Star):
         cursors[cursor_key] = start + count
         return image_urls
 
+    def _resolve_lolicon_tag_groups(
+        self, message_tags: list[str] | None
+    ) -> list[list[str]] | None:
+        """把用户标签展开成 Lolicon 的 ``tag`` 结构（组内 AND、组间 OR）。
+
+        内置同义词表和用户别名会为每个标签产生一个或多个候选；多个标签的
+        候选做笛卡尔积，超出 ``MAX_LOLICON_TAG_GROUPS`` 时截断。
+
+        Args:
+            message_tags: 从消息解析出的标签。
+
+        Returns:
+            Lolicon ``tag`` 参数值；无标签时返回 ``None``。
+        """
+        merged: dict[str, tuple[str, ...]] = dict(LOLICON_TAG_ALIASES)
+        raw_aliases = str(self._config.get("lolicon_tag_aliases", "") or "")
+        for pair in re.split(r"[,，\n]+", raw_aliases):
+            if "=" not in pair:
+                continue
+            alias, target = (part.strip() for part in pair.split("=", 1))
+            if alias and target:
+                merged[alias] = (target,)
+
+        ascii_lookup = {
+            key.lower(): value for key, value in merged.items() if key.isascii()
+        }
+        candidates_per_tag: list[list[str]] = []
+        for raw_tag in message_tags or []:
+            tag = str(raw_tag).strip()
+            if not tag:
+                continue
+            if tag in merged:
+                candidates = list(merged[tag])
+            elif tag.lower() in ascii_lookup:
+                candidates = list(ascii_lookup[tag.lower()])
+            else:
+                candidates = [tag]
+            candidates = [
+                candidate for candidate in dict.fromkeys(candidates) if candidate
+            ]
+            if candidates:
+                candidates_per_tag.append(candidates)
+        if not candidates_per_tag:
+            return None
+        return self._cartesian_tag_groups(candidates_per_tag)
+
+    @staticmethod
+    def _cartesian_tag_groups(
+        candidates_per_tag: list[list[str]],
+    ) -> list[list[str]]:
+        """对每个标签的候选做笛卡尔积，并在组数上限内截断。"""
+        groups: list[list[str]] = []
+        for combo in product(*candidates_per_tag):
+            groups.append(list(combo))
+            if len(groups) >= MAX_LOLICON_TAG_GROUPS:
+                break
+        return groups
+
+    async def _request_lolicon_data(self, payload: dict[str, Any]) -> list[Any]:
+        """发送一次 Lolicon 请求并返回其 ``data`` 列表。"""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        async with self._session.post(
+            "https://api.lolicon.app/setu/v2",
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as response:
+            response.raise_for_status()
+            body: Any = await response.json(content_type=None)
+        if not isinstance(body, dict):
+            raise ValueError("Lolicon API 返回格式异常。")
+        if body.get("error"):
+            raise ValueError("Lolicon API 请求失败。")
+        images = body.get("data")
+        if not isinstance(images, list):
+            raise ValueError("Lolicon API 未返回图片。")
+        return images
+
     async def _fetch_lolicon_images(
         self, count: int, message_tags: list[str] | None = None
     ) -> tuple[list[str], list[str]]:
@@ -2307,73 +2751,58 @@ class CrimsonCosmosPlugin(Star):
         Raises:
             ValueError: If Lolicon rejects the request or returns invalid data.
         """
-        aliases: dict[str, str] = {}
-        raw_aliases = str(self._config.get("lolicon_tag_aliases", "") or "")
-        for pair in re.split(r"[,，\n]+", raw_aliases):
-            if "=" not in pair:
-                continue
-            alias, target = (part.strip() for part in pair.split("=", 1))
-            if alias and target:
-                aliases[alias] = target
-        tags = [aliases.get(tag, tag) for tag in message_tags or []]
-
         r18_modes = {"sfw": 0, "r18": 1, "mix": 2}
         r18 = r18_modes.get(str(self._config.get("lolicon_r18_mode", "r18")).lower(), 1)
         size = str(self._config.get("lolicon_image_size", "small")).lower()
         valid_sizes = {"original", "regular", "small", "thumb", "mini"}
         if size not in valid_sizes:
             size = "small"
-        payload: dict[str, Any] = {
-            "r18": r18,
-            "num": count,
-            "excludeAI": bool(self._config.get("lolicon_exclude_ai", True)),
-            "size": [size],
-        }
-        if tags:
-            payload["tag"] = [tags]
-        aspect_ratio = str(self._config.get("lolicon_aspect_ratio", "") or "").strip()
-        if aspect_ratio in {"gt1", "lt1", "eq1"}:
-            payload["aspectRatio"] = aspect_ratio
-        proxy = str(self._config.get("lolicon_proxy", "") or "").strip()
-        if proxy:
-            payload["proxy"] = proxy
 
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        async with self._session.post(
-            "https://api.lolicon.app/setu/v2",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as response:
-            response.raise_for_status()
-            body: Any = await response.json(content_type=None)
+        tag_groups = self._resolve_lolicon_tag_groups(message_tags)
 
-        if not isinstance(body, dict):
-            raise ValueError("Lolicon API 返回格式异常。")
-        if body.get("error"):
-            raise ValueError("Lolicon API 请求失败。")
-        images = body.get("data")
-        if not isinstance(images, list):
-            raise ValueError("Lolicon API 未返回图片。")
+        def build_payload(with_tags: bool) -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "r18": r18,
+                "num": count,
+                "excludeAI": bool(self._config.get("lolicon_exclude_ai", True)),
+                "size": [size],
+            }
+            if with_tags and tag_groups:
+                payload["tag"] = tag_groups
+            aspect_ratio = str(
+                self._config.get("lolicon_aspect_ratio", "") or ""
+            ).strip()
+            if aspect_ratio in {"gt1", "lt1", "eq1"}:
+                payload["aspectRatio"] = aspect_ratio
+            proxy = str(self._config.get("lolicon_proxy", "") or "").strip()
+            if proxy:
+                payload["proxy"] = proxy
+            return payload
 
-        urls: list[str] = []
-        pids: list[str] = []
-        for image in images:
+        images = await self._request_lolicon_data(build_payload(True))
+        if len(images) < count and tag_groups:
+            logger.warning(
+                "[CrimsonCosmos] Lolicon 标签无足够结果，回退为无标签请求"
+            )
+            images = await self._request_lolicon_data(build_payload(False))
+
+        async def fetch_image(image: Any) -> tuple[str, str] | None:
+            """下载单张 Lolicon 图片，返回 ``(base64_url, pid)``。"""
             if not isinstance(image, dict) or not isinstance(image.get("urls"), dict):
-                continue
+                return None
             image_urls = image["urls"]
-            candidates = [size, "original", "regular", "small", "thumb", "mini"]
+            size_candidates = [size, "original", "regular", "small", "thumb", "mini"]
             image_url = next(
                 (
                     image_urls.get(candidate)
-                    for candidate in dict.fromkeys(candidates)
+                    for candidate in dict.fromkeys(size_candidates)
                     if isinstance(image_urls.get(candidate), str)
                     and image_urls[candidate].startswith(("http://", "https://"))
                 ),
                 None,
             )
             if not image_url:
-                continue
+                return None
             pid = str(image.get("pid", "")).strip()
             raw_proxy_order = self._config.get("lolicon_proxy_order", [])
             proxy_order = raw_proxy_order if isinstance(raw_proxy_order, list) else []
@@ -2390,9 +2819,11 @@ class CrimsonCosmosPlugin(Star):
                 "i.pixiv.nl",
                 "i.pixiv.re",
             }
-            candidates = proxy_order if parsed_url.hostname in pixiv_hosts else []
+            proxy_candidates = (
+                proxy_order if parsed_url.hostname in pixiv_hosts else []
+            )
             for proxy in dict.fromkeys(
-                str(item).strip().rstrip("/") for item in candidates
+                str(item).strip().rstrip("/") for item in proxy_candidates
             ):
                 if not proxy.startswith(("http://", "https://")):
                     continue
@@ -2423,8 +2854,6 @@ class CrimsonCosmosPlugin(Star):
                     30,
                 ),
             )
-            resolved_url = None
-            resolved_image = None
             for proxy_url in proxy_urls:
                 try:
                     async with self._session.get(
@@ -2440,17 +2869,23 @@ class CrimsonCosmosPlugin(Star):
                         resolved_image = bytes(image_buffer)
                         if not resolved_image:
                             raise ValueError("Pixiv 图片代理返回空内容。")
-                    resolved_url = proxy_url
-                    break
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
                     logger.warning("Pixiv image proxy unavailable: %s", proxy_url)
-            if not resolved_url or resolved_image is None:
+                    continue
+                encoded = "base64://" + base64.b64encode(resolved_image).decode("ascii")
+                return (encoded, pid if pid.isdigit() else "")
+            return None
+
+        results = await asyncio.gather(*(fetch_image(image) for image in images))
+        urls: list[str] = []
+        pids: list[str] = []
+        for result in results:
+            if result is None:
                 continue
-            urls.append("base64://" + base64.b64encode(resolved_image).decode("ascii"))
-            if pid.isdigit() and pid not in pids:
+            encoded, pid = result
+            urls.append(encoded)
+            if pid and pid not in pids:
                 pids.append(pid)
-            if len(urls) == count:
-                break
         if len(urls) != count:
             raise ValueError("Lolicon API 未返回足够的可用图片。")
         return urls, pids

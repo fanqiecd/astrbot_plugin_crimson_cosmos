@@ -3197,3 +3197,133 @@ def test_should_parse_jm_cookies_into_client_metadata(tmp_path: Path) -> None:
         "AVS": "token-value",
         "session": "abc=123",
     }
+
+
+def test_should_default_bypass_to_quality_preserving_transform() -> None:
+    """Bypass ships on with a quality-preserving transform preset."""
+    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+    delivery = schema["delivery_settings"]["items"]
+
+    assert delivery["bypass_mode"]["default"] == "transform"
+    assert delivery["bypass_mode"]["options"] == [
+        "off",
+        "transform",
+        "file",
+        "transform_file",
+    ]
+    assert delivery["bypass_noise"]["default"] == 8
+    assert delivery["bypass_rotate"]["default"] == 1.0
+    assert delivery["bypass_resize_ratio"]["default"] == 0.98
+    assert delivery["bypass_jpeg_quality"]["default"] == 90
+
+    # A config that omits the key entirely still disables processing.
+    plugin, _session = make_plugin({}, None)
+
+    assert plugin._bypass_config() is None
+
+
+def test_should_perturb_a_base64_image_into_a_fresh_jpeg_file(tmp_path: Path) -> None:
+    """File-mode bypass re-encodes the source and returns a local file ref."""
+    import base64
+    import io as _io
+
+    from PIL import Image
+
+    source = _io.BytesIO()
+    Image.new("RGB", (64, 64), (180, 60, 120)).save(source, format="JPEG")
+    encoded = "base64://" + base64.b64encode(source.getvalue()).decode("ascii")
+
+    plugin, _session = make_plugin(
+        {
+            "bypass_mode": "transform_file",
+            "bypass_noise": 10,
+            "bypass_rotate": 0,
+            "bypass_flip": False,
+            "bypass_resize_ratio": 1.0,
+            "bypass_hue_shift": 0,
+            "bypass_brightness": 1.0,
+        },
+        None,
+    )
+    original_temp_path = MODULE.get_astrbot_temp_path
+    MODULE.get_astrbot_temp_path = lambda: str(tmp_path)
+    try:
+        kind, ref = asyncio.run(plugin._prepare_image_ref(encoded))
+    finally:
+        MODULE.get_astrbot_temp_path = original_temp_path
+
+    assert kind == "file"
+    assert Path(ref).exists()
+    with Image.open(ref) as reopened:
+        assert reopened.format == "JPEG"
+    assert Path(ref).read_bytes() != source.getvalue()
+
+
+def test_should_expand_builtin_synonyms_into_or_tag_groups() -> None:
+    """Built-in synonyms turn one tag into OR groups without user aliases."""
+    plugin, _session = make_plugin({}, None)
+
+    assert plugin._resolve_lolicon_tag_groups(["白丝"]) == [
+        ["白丝"],
+        ["白タイツ"],
+        ["白色连裤袜"],
+    ]
+    assert plugin._resolve_lolicon_tag_groups(["JK"]) == [
+        ["水手服"],
+        ["校服"],
+    ]
+
+
+def test_should_override_builtin_synonyms_with_user_aliases() -> None:
+    """User aliases override built-ins and unknown tags pass through."""
+    plugin, _session = make_plugin(
+        {"lolicon_tag_aliases": "白丝=white_pantyhose\nDeepSeek=deepseek"},
+        None,
+    )
+
+    assert plugin._resolve_lolicon_tag_groups(["白丝", "DeepSeek", "任意标签"]) == [
+        ["white_pantyhose", "deepseek", "任意标签"]
+    ]
+
+
+def test_should_fall_back_to_untagged_lolicon_when_tags_have_no_results() -> None:
+    """Tagged requests with zero results retry once without the tag filter."""
+
+    class Session(FakeSession):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self.posts: list[dict[str, object]] = []
+
+        def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, object],
+            timeout: object = None,
+        ) -> FakeResponse:
+            del url, timeout
+            self.posts.append(json)
+            if "tag" in json:
+                return FakeResponse({"error": "", "data": []})
+            return FakeResponse(
+                {
+                    "error": "",
+                    "data": [
+                        {
+                            "pid": 1,
+                            "urls": {"small": "https://images.example/one.jpg"},
+                        }
+                    ],
+                }
+            )
+
+    plugin, _session = make_plugin({}, None)
+    plugin._session = Session()
+
+    urls, pids = asyncio.run(plugin._fetch_lolicon_images(1, ["不存在的标签"]))
+
+    assert pids == ["1"]
+    assert urls == ["base64://aW1hZ2UtYnl0ZXM="]
+    assert len(plugin._session.posts) == 2
+    assert plugin._session.posts[0]["tag"] == [["不存在的标签"]]
+    assert "tag" not in plugin._session.posts[1]

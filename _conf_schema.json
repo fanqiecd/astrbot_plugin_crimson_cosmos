@@ -30,7 +30,15 @@
       "multi_image_send_mode": {"type": "string", "description": "多图发送方式", "options": ["direct", "forward"], "hint": "direct 为逐张发送；forward 为 OneBot 合并转发聊天记录，不支持时自动回退逐张发送。", "default": "direct"},
       "single_image_forward": {"type": "bool", "description": "单张图片使用聊天记录", "hint": "开启后单张图片也通过 OneBot 合并转发发送；不支持时自动回退普通图片发送。", "default": false},
       "auto_recall": {"type": "bool", "description": "自动撤回发送的图片", "hint": "仅对支持 OneBot 撤回接口的平台生效。", "default": false},
-      "recall_delay_seconds": {"type": "int", "description": "自动撤回延迟（秒）", "hint": "填写 0 可尽快撤回；待撤回任务会在插件重载后恢复。", "default": 60}
+      "recall_delay_seconds": {"type": "int", "description": "自动撤回延迟（秒）", "hint": "填写 0 可尽快撤回；待撤回任务会在插件重载后恢复。", "default": 60},
+      "bypass_mode": {"type": "string", "description": "过审处理方式", "options": ["off", "transform", "file", "transform_file"], "hint": "off 关闭；transform 扰动后仍按图片发送；file 扰动后改为文件发送；transform_file 扰动并按文件发送（效果最强）。需安装 Pillow。", "default": "transform"},
+      "bypass_noise": {"type": "int", "description": "噪点强度", "hint": "0-64，加入随机像素噪点，破坏图片指纹。", "default": 8},
+      "bypass_rotate": {"type": "float", "description": "随机旋转角度上限", "hint": "0-12 度，轻微旋转破坏对齐类检测。", "default": 1.0},
+      "bypass_flip": {"type": "bool", "description": "随机水平翻转", "hint": "以 50% 概率水平镜像图片。", "default": true},
+      "bypass_resize_ratio": {"type": "float", "description": "缩放抖动比例", "hint": "0.70-1.00，随机微缩放破坏精确哈希；1.00 关闭缩放。", "default": 0.98},
+      "bypass_jpeg_quality": {"type": "int", "description": "重编码质量", "hint": "50-100，较低质量引入压缩噪声并强制重编码。", "default": 90},
+      "bypass_hue_shift": {"type": "int", "description": "色相偏移", "hint": "-45 到 45 度，偏移肤色检测；0 关闭。", "default": 0},
+      "bypass_brightness": {"type": "float", "description": "亮度抖动", "hint": "0.70-1.40；1.00 关闭。", "default": 1.0}
     }
   },
   "message_settings": {
@@ -66,7 +74,7 @@
       "lolicon_proxy": {"type": "string", "description": "图片反代地址", "hint": "可选，传给 Lolicon API 用于改写返回的图片地址。", "default": ""},
       "lolicon_proxy_order": {"type": "list", "description": "图片代理尝试顺序", "hint": "依次检测代理，超时或失败后自动尝试下一个。", "default": ["https://i.loli.best", "https://pixiv.cat", "https://i.pixiv.nl", "https://i.pixiv.re"]},
       "lolicon_proxy_timeout_seconds": {"type": "int", "description": "单个图片代理超时（秒）", "hint": "允许 1 到 30 秒。", "default": 8},
-      "lolicon_tag_aliases": {"type": "text", "description": "标签别名", "hint": "每行或逗号分隔，格式为 白丝=white_pantyhose；输入 DeepSeek涩图 时会自动把 DeepSeek 当作标签。", "default": ""},
+      "lolicon_tag_aliases": {"type": "text", "description": "自定义标签别名（覆盖内置同义词）", "hint": "每行或逗号分隔，格式为 白丝=white_pantyhose；留空即可使用内置常见标签自动转换（白丝、黑丝、猫耳、泳装、萝莉等）。自定义别名会覆盖内置同义词。", "default": ""},
       "show_pixiv_pid": {"type": "bool", "description": "回显 Pixiv PID", "hint": "在图片后发送去重后的 PID 列表。", "default": false}
     }
   },
