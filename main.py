@@ -846,18 +846,21 @@ class CrimsonCosmosPlugin(Star):
                     if len(buffer) > 20 * 1024 * 1024:
                         raise ValueError("图片超过 20 MiB 限制。")
                 return bytes(buffer)
+        if parsed.scheme != "file":
+            # 纯本地路径（例如 Windows 的 C:\\...）：urlsplit 会把盘符误判为
+            # 单字母协议，这里直接按原路径读取，避免丢掉盘符。
+            return Path(image_ref).read_bytes()
         path_value = parsed.path
-        if parsed.scheme == "file":
-            if parsed.netloc:
-                path_value = f"//{parsed.netloc}{parsed.path}"
-            elif (
-                path_value.startswith("/")
-                and len(path_value) > 2
-                and path_value[2] == ":"
-            ):
-                # Windows file:///C:/... URI: drop the leading slash.
-                path_value = path_value[1:]
-        return Path(path_value or image_ref).read_bytes()
+        if parsed.netloc:
+            path_value = f"//{parsed.netloc}{parsed.path}"
+        elif (
+            path_value.startswith("/")
+            and len(path_value) > 2
+            and path_value[2] == ":"
+        ):
+            # Windows file:///C:/... URI: drop the leading slash.
+            path_value = path_value[1:]
+        return Path(path_value).read_bytes()
 
     async def _prepare_image_ref(self, image_ref: str) -> tuple[str, str]:
         """Return ``(kind, ref)`` after optionally bypass-processing the image.
@@ -924,6 +927,15 @@ class CrimsonCosmosPlugin(Star):
         if text:
             components.append(Plain(text))
         return components
+
+    @staticmethod
+    def _cleanup_local_images(paths: list[str]) -> None:
+        """尽力删除已下载到磁盘的临时图片文件。"""
+        for ref in paths:
+            try:
+                Path(ref).unlink(missing_ok=True)
+            except OSError:
+                continue
 
     async def _build_image_components(
         self, image_ref: str, text: str | None = None
@@ -1457,6 +1469,11 @@ class CrimsonCosmosPlugin(Star):
                 event.stop_event()
             return
 
+        temp_paths = [
+            ref
+            for ref in image_urls
+            if not ref.startswith(("http://", "https://", "base64://"))
+        ]
         pid_text = (
             "Pixiv PID: " + ",".join(image_pids)
             if self._config.get("show_pixiv_pid", False) and image_pids
@@ -1480,6 +1497,7 @@ class CrimsonCosmosPlugin(Star):
             else None
         )
         if forward_status is False:
+            self._cleanup_local_images(temp_paths)
             failure_message = str(self._config.get("failure_message", "") or "").strip()
             yield event.plain_result(failure_message or "图片发送失败，请稍后重试。")
             if block_other_handlers:
@@ -1512,6 +1530,7 @@ class CrimsonCosmosPlugin(Star):
                     all_images_delivered = False
         if pid_text and not sent_as_forward and all_images_delivered:
             yield event.plain_result(pid_text)
+        self._cleanup_local_images(temp_paths)
         if block_other_handlers:
             event.stop_event()
 
@@ -2773,17 +2792,31 @@ class CrimsonCosmosPlugin(Star):
             raise ValueError("Lolicon API 未返回图片。")
         return images
 
+    @staticmethod
+    def _image_suffix(leading: bytes) -> str:
+        """按文件头推断图片扩展名，无法识别时默认按 JPEG 处理。"""
+        if leading.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if leading.startswith((b"GIF87a", b"GIF89a")):
+            return ".gif"
+        if leading.startswith(b"RIFF") and leading[8:12] == b"WEBP":
+            return ".webp"
+        return ".jpg"
+
     async def _fetch_lolicon_images(
         self, count: int, message_tags: list[str] | None = None
     ) -> tuple[list[str], list[str]]:
-        """Fetch filtered Pixiv image URLs through the Lolicon API.
+        """Fetch filtered Pixiv images through the Lolicon API.
+
+        图片经反代下载后落盘到 AstrBot 临时目录，返回本地文件路径，避免把
+        全部图片字节长期留在内存里。
 
         Args:
-            count: Number of image URLs to return.
+            count: Number of images to return.
             message_tags: Tags parsed from the triggering message.
 
         Returns:
-            Image URLs and their unique Pixiv IDs.
+            Local image file paths and their unique Pixiv IDs.
 
         Raises:
             ValueError: If Lolicon rejects the request or returns invalid data.
@@ -2824,7 +2857,7 @@ class CrimsonCosmosPlugin(Star):
             images = await self._request_lolicon_data(build_payload(False))
 
         async def fetch_image(image: Any) -> tuple[str, str] | None:
-            """下载单张 Lolicon 图片，返回 ``(base64_url, pid)``。"""
+            """下载单张 Lolicon 图片到磁盘，返回 ``(本地路径, pid)``。"""
             if not isinstance(image, dict) or not isinstance(image.get("urls"), dict):
                 return None
             image_urls = image["urls"]
@@ -2898,7 +2931,12 @@ class CrimsonCosmosPlugin(Star):
                 ),
                 "Referer": "https://www.pixiv.net/",
             }
+            temporary_dir = Path(get_astrbot_temp_path())
+            temporary_dir.mkdir(parents=True, exist_ok=True)
             for index, proxy_url in enumerate(proxy_urls):
+                temporary_path = temporary_dir / (
+                    f"crimson_cosmos_lolicon_{time.time_ns()}.part"
+                )
                 try:
                     async with self._session.get(
                         proxy_url,
@@ -2906,33 +2944,54 @@ class CrimsonCosmosPlugin(Star):
                         timeout=aiohttp.ClientTimeout(total=timeout_seconds),
                     ) as response:
                         response.raise_for_status()
-                        image_buffer = bytearray()
-                        async for chunk in response.content.iter_chunked(64 * 1024):
-                            image_buffer.extend(chunk)
-                            if len(image_buffer) > 20 * 1024 * 1024:
-                                raise ValueError("Pixiv 图片超过 20 MiB 限制。")
-                        resolved_image = bytes(image_buffer)
-                        if not resolved_image:
-                            raise ValueError("Pixiv 图片返回空内容。")
-                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                        leading = bytearray()
+                        total = 0
+                        try:
+                            with temporary_path.open("wb") as handle:
+                                async for chunk in response.content.iter_chunked(
+                                    64 * 1024
+                                ):
+                                    total += len(chunk)
+                                    if total > 20 * 1024 * 1024:
+                                        raise ValueError(
+                                            "Pixiv 图片超过 20 MiB 限制。"
+                                        )
+                                    if len(leading) < 12:
+                                        leading.extend(chunk[: 12 - len(leading)])
+                                    handle.write(chunk)
+                        except BaseException:
+                            temporary_path.unlink(missing_ok=True)
+                            raise
+                    if total == 0:
+                        temporary_path.unlink(missing_ok=True)
+                        raise ValueError("Pixiv 图片返回空内容。")
+                except (
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                    ValueError,
+                    OSError,
+                ):
                     logger.warning("Pixiv image download failed: %s", proxy_url)
                     if index + 1 < len(proxy_urls):
                         await asyncio.sleep(0.4 * (index + 1))
                     continue
-                encoded = "base64://" + base64.b64encode(resolved_image).decode("ascii")
-                return (encoded, pid if pid.isdigit() else "")
+                final_path = temporary_path.with_suffix(
+                    self._image_suffix(bytes(leading))
+                )
+                temporary_path.replace(final_path)
+                return (str(final_path.resolve()), pid if pid.isdigit() else "")
             return None
 
         results = await asyncio.gather(*(fetch_image(image) for image in images))
-        urls: list[str] = []
+        paths: list[str] = []
         pids: list[str] = []
         for result in results:
             if result is None:
                 continue
-            encoded, pid = result
-            urls.append(encoded)
+            path, pid = result
+            paths.append(path)
             if pid and pid not in pids:
                 pids.append(pid)
-        if len(urls) != count:
+        if len(paths) != count:
             raise ValueError("Lolicon API 未返回足够的可用图片。")
-        return urls, pids
+        return paths, pids

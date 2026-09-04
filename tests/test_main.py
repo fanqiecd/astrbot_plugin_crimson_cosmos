@@ -222,6 +222,21 @@ async def collect_results(plugin: object, event: FakeEvent) -> list[tuple[str, s
     return [result async for result in plugin.on_message(event)]
 
 
+def stub_temp_dir(tmp_path: Path):
+    """把插件的临时目录重定向到 ``tmp_path``，测试结束后恢复。"""
+    original = MODULE.get_astrbot_temp_path
+    MODULE.get_astrbot_temp_path = lambda: str(tmp_path)
+
+    class _Restore:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            MODULE.get_astrbot_temp_path = original
+
+    return _Restore()
+
+
 def test_should_describe_group_replies_as_an_enabled_allowlist() -> None:
     """The group access copy matches its enable-switch and allowlist behavior."""
     schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
@@ -633,7 +648,7 @@ def test_should_apply_the_private_reply_allowlist_to_keyword_requests() -> None:
         assert bool(session.calls) is should_reply
 
 
-def test_should_parse_alias_tags_before_a_suffix_keyword() -> None:
+def test_should_parse_alias_tags_before_a_suffix_keyword(tmp_path: Path) -> None:
     """A tag directly before the keyword is converted through the alias map."""
     plugin, session = make_plugin(
         {
@@ -656,9 +671,12 @@ def test_should_parse_alias_tags_before_a_suffix_keyword() -> None:
         },
     )
 
-    results = asyncio.run(collect_results(plugin, FakeEvent("DeepSeek涩图")))
+    with stub_temp_dir(tmp_path):
+        results = asyncio.run(collect_results(plugin, FakeEvent("DeepSeek涩图")))
 
-    assert results == [("image", "base64://aW1hZ2UtYnl0ZXM=")]
+    assert len(results) == 1
+    assert results[0][0] == "image"
+    assert results[0][1].startswith(str(tmp_path))
     assert session.post_calls[0][1]["tag"] == [["deepseek"]]
 
 
@@ -875,7 +893,7 @@ def test_should_retry_failed_base64_image_as_a_local_temp_file(tmp_path: Path) -
     assert list(tmp_path.iterdir()) == []
 
 
-def test_should_not_send_pixiv_pid_when_image_delivery_fails() -> None:
+def test_should_not_send_pixiv_pid_when_image_delivery_fails(tmp_path: Path) -> None:
     """A delivery failure must not be followed by a standalone Pixiv PID."""
 
     class Bot:
@@ -917,7 +935,8 @@ def test_should_not_send_pixiv_pid_when_image_delivery_fails() -> None:
     )
     event = Event()
 
-    results = asyncio.run(collect_results(plugin, event))
+    with stub_temp_dir(tmp_path):
+        results = asyncio.run(collect_results(plugin, event))
 
     assert results == []
     assert event.bot.actions[2][1]["message"] == [
@@ -1139,8 +1158,10 @@ def test_should_restore_persisted_recall_tasks_after_reload(tmp_path: Path) -> N
     assert json.loads(task_file.read_text(encoding="utf-8")) == []
 
 
-def test_should_fetch_lolicon_images_with_filters_aliases_and_pid_output() -> None:
-    """Lolicon receives configured filters and returns selected image URLs."""
+def test_should_fetch_lolicon_images_with_filters_aliases_and_pid_output(
+    tmp_path: Path,
+) -> None:
+    """Lolicon receives configured filters and returns downloaded local images."""
     plugin, session = make_plugin(
         {
             "enable_group": True,
@@ -1170,13 +1191,14 @@ def test_should_fetch_lolicon_images_with_filters_aliases_and_pid_output() -> No
         },
     )
 
-    results = asyncio.run(collect_results(plugin, FakeEvent("来两份白丝、猫耳色图")))
+    with stub_temp_dir(tmp_path):
+        results = asyncio.run(collect_results(plugin, FakeEvent("来两份白丝、猫耳色图")))
 
-    assert results == [
-        ("image", "base64://aW1hZ2UtYnl0ZXM="),
-        ("image", "base64://aW1hZ2UtYnl0ZXM="),
-        ("text", "Pixiv PID: 123,456"),
-    ]
+    assert results[0][0] == "image"
+    assert results[1][0] == "image"
+    assert results[0][1].startswith(str(tmp_path))
+    assert results[1][1].startswith(str(tmp_path))
+    assert results[2] == ("text", "Pixiv PID: 123,456")
     assert session.post_calls == [
         (
             "https://api.lolicon.app/setu/v2",
@@ -1193,7 +1215,7 @@ def test_should_fetch_lolicon_images_with_filters_aliases_and_pid_output() -> No
     ]
 
 
-def test_should_fall_back_to_the_next_pixiv_image_proxy() -> None:
+def test_should_fall_back_to_the_next_pixiv_image_proxy(tmp_path: Path) -> None:
     """Lolicon image URLs use the first reachable configured proxy."""
     plugin, session = make_plugin(
         {
@@ -1233,9 +1255,11 @@ def test_should_fall_back_to_the_next_pixiv_image_proxy() -> None:
 
     session.get = get_with_failed_primary
 
-    urls, pids = asyncio.run(plugin._fetch_lolicon_images(1))
+    with stub_temp_dir(tmp_path):
+        paths, pids = asyncio.run(plugin._fetch_lolicon_images(1))
 
-    assert urls == ["base64://aW1hZ2UtYnl0ZXM="]
+    assert len(paths) == 1
+    assert Path(paths[0]).read_bytes() == b"image-bytes"
     assert pids == ["123"]
     assert attempted_urls == [
         "https://i.loli.best/c/540x540_70/img-master/img/2026/01/02/03/04/05/123_p0_master1200.jpg",
@@ -1760,7 +1784,9 @@ def test_should_send_single_image_as_a_forward_chat_record_when_enabled() -> Non
     ]
 
 
-def test_should_put_pixiv_pid_inside_single_image_forward_record() -> None:
+def test_should_put_pixiv_pid_inside_single_image_forward_record(
+    tmp_path: Path,
+) -> None:
     """A single forwarded image puts its Pixiv PID before the image."""
     plugin, _ = make_plugin(
         {
@@ -1785,7 +1811,8 @@ def test_should_put_pixiv_pid_inside_single_image_forward_record() -> None:
     )
 
     event = FakeRecallEvent("色图")
-    results = asyncio.run(collect_results(plugin, event))
+    with stub_temp_dir(tmp_path):
+        results = asyncio.run(collect_results(plugin, event))
 
     assert results == [("text", "正在获取喵~")]
     assert event.bot.actions == [
@@ -1817,7 +1844,9 @@ def test_should_put_pixiv_pid_inside_single_image_forward_record() -> None:
     ]
 
 
-def test_should_put_each_pixiv_pid_inside_multi_image_forward_record() -> None:
+def test_should_put_each_pixiv_pid_inside_multi_image_forward_record(
+    tmp_path: Path,
+) -> None:
     """Each forwarded image node begins with its matching Pixiv PID."""
     plugin, _session = make_plugin(
         {
@@ -1846,7 +1875,8 @@ def test_should_put_each_pixiv_pid_inside_multi_image_forward_record() -> None:
     )
 
     event = FakeRecallEvent("来两份色图")
-    results = asyncio.run(collect_results(plugin, event))
+    with stub_temp_dir(tmp_path):
+        results = asyncio.run(collect_results(plugin, event))
 
     assert results == [("text", "正在获取喵~")]
     action, payload = event.bot.actions[0]
@@ -3293,7 +3323,9 @@ def test_should_override_builtin_synonyms_with_user_aliases() -> None:
     ]
 
 
-def test_should_fall_back_to_untagged_lolicon_when_tags_have_no_results() -> None:
+def test_should_fall_back_to_untagged_lolicon_when_tags_have_no_results(
+    tmp_path: Path,
+) -> None:
     """Tagged requests with zero results retry once without the tag filter."""
 
     class Session(FakeSession):
@@ -3327,10 +3359,14 @@ def test_should_fall_back_to_untagged_lolicon_when_tags_have_no_results() -> Non
     plugin, _session = make_plugin({}, None)
     plugin._session = Session()
 
-    urls, pids = asyncio.run(plugin._fetch_lolicon_images(1, ["不存在的标签"]))
+    with stub_temp_dir(tmp_path):
+        paths, pids = asyncio.run(
+            plugin._fetch_lolicon_images(1, ["不存在的标签"])
+        )
 
     assert pids == ["1"]
-    assert urls == ["base64://aW1hZ2UtYnl0ZXM="]
+    assert len(paths) == 1
+    assert Path(paths[0]).read_bytes() == b"image-bytes"
     assert len(plugin._session.posts) == 2
     assert plugin._session.posts[0]["tag"] == [["不存在的标签"]]
     assert "tag" not in plugin._session.posts[1]

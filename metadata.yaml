@@ -2,5 +2,5 @@ name: astrbot_plugin_crimson_cosmos
 display_name: 绯色万象
 desc: 获取 NSFW 图片、查询 Jable 影片，并搜索、查看和下载 JM 本子。
 short_desc: 图片、Jable 与 JM 本子插件。
-version: v0.3.3
+version: v0.3.4
 author: Echo

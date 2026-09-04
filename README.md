@@ -4,7 +4,7 @@
 
 <i>支持多图片源、动态标签、故障切换与自动撤回的 AstrBot 图片插件。</i>
 
-![Version](https://img.shields.io/badge/version-v0.3.3-blue)
+![Version](https://img.shields.io/badge/version-v0.3.4-blue)
 
 </div>
 
