@@ -247,27 +247,6 @@ async def run_benchmark() -> list[dict[str, object]]:
     sample = make_sample_jpeg()
     rows: list[dict[str, object]] = []
 
-    # --- 自定义 API：多图并行拉取 --------------------------------------- #
-    plugin = build_plugin(plugin_mod)
-    plugin._config = {
-        "custom_api_url": "https://api.example/image",
-        "custom_api_image_url_path": "url",
-    }
-    plugin._session = LatencySession(get_payload={"url": "https://images.example/x.jpg"})
-    seq = await measure(lambda: _sequential_custom(plugin))
-    par = await measure(lambda: _parallel_custom(plugin))
-    rows.append(_row("自定义 API · 3 张", seq, par))
-
-    # --- Nekos API：多图并行拉取 ---------------------------------------- #
-    plugin = build_plugin(plugin_mod)
-    plugin._config = {"nekos_api_rating": "露骨"}
-    plugin._session = LatencySession(
-        get_payload={"url": "https://cdn.nekosapi.com/x.webp"}
-    )
-    seq = await measure(lambda: _sequential_nekos(plugin))
-    par = await measure(lambda: plugin._fetch_nekos_api_images(3))
-    rows.append(_row("Nekos API · 3 张", seq, par))
-
     # --- Lolicon：代理下载并行化 ---------------------------------------- #
     plugin = build_plugin(plugin_mod)
     plugin._config = {
@@ -312,20 +291,6 @@ async def run_benchmark() -> list[dict[str, object]]:
     rows.append(_row("过审处理 · 3 张", seq, par))
 
     return rows
-
-
-async def _sequential_custom(plugin) -> None:
-    for _ in range(3):
-        await plugin._fetch_custom_image([])
-
-
-async def _parallel_custom(plugin) -> None:
-    await asyncio.gather(*(plugin._fetch_custom_image([]) for _ in range(3)))
-
-
-async def _sequential_nekos(plugin) -> None:
-    for _ in range(3):
-        await plugin._fetch_nekos_api_images(1)
 
 
 async def _sequential_lolicon(plugin) -> None:

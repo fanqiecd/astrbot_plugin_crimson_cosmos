@@ -2,9 +2,9 @@
 
 # 🌌 AstrBot 绯色万象
 
-<i>支持多图片源、动态标签、故障切换与自动撤回的 AstrBot 图片插件。</i>
+<i>支持多图片源、动态标签、故障切换、聊天记录发送与自动撤回的 AstrBot 图片插件。</i>
 
-![Version](https://img.shields.io/badge/version-v0.3.4-blue)
+![Version](https://img.shields.io/badge/version-v0.4.0-blue)
 
 </div>
 
@@ -12,22 +12,24 @@
 
 ## 📖 简介
 
-astrbot_plugin_crimson_cosmos 会在指定群聊或私聊中监听关键词，从 Lolicon、Wallhaven 或自定义 API 获取图片。插件支持数量与标签解析、多来源重试、OneBot 合并转发，以及发送后自动撤回。
+astrbot_plugin_crimson_cosmos 会在指定群聊或私聊中监听关键词，从 Lolicon 或 Wallhaven 获取图片。插件支持数量与标签解析、多来源重试、OneBot 聊天记录（合并转发）发送，以及发送后自动撤回（2 分钟内）。
 同时支持通过 `/av` 查询 Jable 的热门、新片、主题和女优影片信息，以及搜索 MissAV 作品和获取磁力链接。
 支持通过 `/jm` 搜索、查看和下载 JM 本子，下载结果使用普通 ZIP 发送。
+Lolicon、Jable、JM 三项功能均可单独开关。
 
 ---
 
 ## ✨ 功能特性
 
-- 🎨 **多图片源** - 支持 Lolicon、Wallhaven 和自定义 JSON API。
+- 🎨 **多图片源** - 支持 Lolicon 和 Wallhaven。
 - 🏷️ **动态标签** - 从消息中提取标签，并支持 Lolicon 标签别名。
 - 🔢 **多图请求** - 支持中文或阿拉伯数字，单次最多 5 张。
 - ⚡ **并发获取** - 多图请求、来源拉取、代理下载与过审处理均并行执行，降低延迟。
 - 🔄 **故障切换** - 来源请求失败后自动重试并尝试备用来源。
-- 💬 **图片发送** - 支持逐张发送、单图聊天记录和 OneBot 合并转发。
-- ⏱️ **自动撤回** - 撤回延迟可配置，任务可在插件重载后恢复。
+- 💬 **聊天记录发送** - 全局开关，开启后本插件发送的文本、图片、封面和文件均优先通过 OneBot 合并转发聊天记录发送。
+- ⏱️ **自动撤回** - 本插件通过 OneBot 发送的文本、图片、封面和文件均可自动撤回；延迟限制在 2 分钟内，任务可在插件重载后恢复。
 - 🛡️ **会话限制** - 可分别控制私聊和允许使用的群聊。
+- 🔘 **功能开关** - Lolicon、Jable、JM 本子可分别启用或关闭。
 - 📚 **JM 本子** - 支持搜索、详情、日/周/月榜和普通 ZIP 下载。
 - 🔎 **MissAV 搜索** - 支持按番号、女优或标题关键词查找作品。
 - 🧲 **MissAV 磁力** - 支持从作品详情页返回最多 5 条磁力链接，不自动下载。
@@ -129,15 +131,14 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 
 | 配置项 | 说明 | 默认值 |
 | :--- | :--- | :--- |
-| multi_image_send_mode | direct 逐张发送或 forward 合并转发 | direct |
-| single_image_forward | 单张图片也通过 OneBot 合并转发聊天记录发送 | false |
-| auto_recall | 自动撤回 OneBot 图片消息 | false |
-| recall_delay_seconds | 自动撤回延迟，单位秒 | 60 |
+| use_forward | 使用聊天记录（合并转发）发送本插件的文本、图片、封面和文件 | false |
+| auto_recall | 自动撤回本插件通过 OneBot 发送的消息 | false |
+| recall_delay_seconds | 自动撤回延迟（秒），限制在 2 分钟（0-120 秒）内 | 60 |
 | fetching_message | 开始获取提示，留空关闭 | 正在获取喵~ |
 | group_disabled_message | 群聊回复关闭且关键词命中时发送，留空关闭 | 本喵暂时不提供此服务喵~ |
 | cooldown_message | 冷却期间提示，留空关闭 | 冷却中呢喵~ |
 | failure_message | 最终失败提示，留空关闭 | 涩图获取失败了喵，请稍后再试~ |
-| image_source | 默认图片来源 | custom |
+| image_source | 默认图片来源 | lolicon |
 | image_source_order | 图片来源故障切换顺序 | [] |
 | request_retry_count | 每个来源的重试次数 | 3 |
 
@@ -162,23 +163,21 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 
 | 配置项 | 说明 | 默认值 |
 | :--- | :--- | :--- |
+| enable_lolicon | 启用 Lolicon 图片源；关闭后若只配置了 Lolicon 将无法获取图片 | true |
 | lolicon_r18_mode | sfw、r18 或 mix | r18 |
 | lolicon_exclude_ai | 排除 AI 图片 | true |
 | lolicon_aspect_ratio | 不限、横图、竖图或方图 | 空 |
 | lolicon_image_size | 请求图片尺寸：original 原图、regular 常规尺寸、small 小尺寸、thumb 缩略图、mini 极小缩略图 | small |
 | lolicon_proxy | 图片反代地址 | 空 |
-| lolicon_proxy_order | 图片代理尝试顺序，失败自动切换 | i.loli.best、pixiv.cat、i.pixiv.nl、i.pixiv.re |
-| lolicon_proxy_timeout_seconds | 单个图片代理超时秒数 | 8 |
+| lolicon_proxy_order | 图片代理尝试顺序，失败自动切换 | i.pixiv.re、i.pixiv.nl、i.loli.best |
+| lolicon_proxy_timeout_seconds | 单个图片代理超时秒数 | 30 |
 | lolicon_tag_aliases | 自定义标签别名（覆盖内置同义词），留空使用内置常见标签转换 | 空 |
 | show_pixiv_pid | 回显 Pixiv PID | false |
 
-### 自定义 API 与 Wallhaven
+### Wallhaven
 
 | 配置项 | 说明 | 默认值 |
 | :--- | :--- | :--- |
-| custom_api_url | 自定义 JSON API 地址 | 空 |
-| custom_api_image_url_path | 图片 URL 的点号路径 | url |
-| custom_api_tag_parameter | 动态标签参数名 | tag |
 | wallhaven_api_key | Wallhaven 成人内容 API Key | 空 |
 | wallhaven_categories | 图片分类，可选通用、动漫、人物 | ["动漫"] |
 | wallhaven_purity | 内容分级，可选全年龄、擦边、成人 | ["成人"] |
@@ -189,14 +188,22 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 
 | 配置项 | 说明 | 默认值 |
 | :--- | :--- | :--- |
+| enable_jable | 启用 Jable 影片查询；关闭后只返回提示且不请求网络 | true |
+| jable_show_cover | 显示封面 | true |
+| jable_show_code | 显示车牌号 | true |
+| jable_show_title | 显示标题 | true |
+| jable_show_stars | 显示红星数量 | true |
+| jable_show_themes | 显示主题 | true |
 | jable_show_detail_link | 在影片汇报中显示 Jable 详情页链接 | true |
 
 ### JM 本子
 
 | 配置项 | 说明 | 默认值 |
 | :--- | :--- | :--- |
+| enable_jm | 启用 JM 本子；关闭后只返回提示且不请求网络 | true |
 | jm_client_type | jmcomic 客户端，api 或 html | api |
 | jm_cookies | 浏览器请求中的完整 JM Cookie 字符串 | 空 |
+| jm_cooldown_seconds | JM 本子冷却时间（秒），0 表示关闭 | 0 |
 | jm_client_domain | 自定义 JM 域名，逗号分隔 | 空 |
 | jm_retry_times | 请求重试次数，0 使用默认值 | 0 |
 | jm_use_proxy | 启用 JM 代理 | false |
@@ -205,7 +212,6 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 | jm_max_concurrent_images | 并发图片数 | 5 |
 | jm_search_page_size | 搜索和榜单显示数量 | 5 |
 | jm_auto_delete_after_send | 发送 ZIP 后删除本地文件 | true |
-| jm_reply_as_forward | JM 封面回复使用 OneBot 合并转发聊天记录 | false |
 
 ---
 
@@ -215,8 +221,6 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 
 | 场景 | 串行 | 并发 | 加速比 |
 | :--- | :--- | :--- | :--- |
-| 自定义 API · 3 张 | 323.7ms | 108.3ms | ~3.0x |
-| Nekos API · 3 张 | 323.3ms | 109.1ms | ~3.0x |
 | Lolicon · 3 张下载 | 433.8ms | 219.1ms | ~2.0x |
 | 过审处理 · 3 张 | 645.6ms | 303.9ms | ~2.1x |
 
@@ -231,7 +235,6 @@ MissAV 搜索排名支持 1–30；磁力命令默认返回详情页前 5 条磁
 - [Jina Reader](https://r.jina.ai)（读取受 Cloudflare 保护的公开页面）
 - [Microlink](https://microlink.io)（封面占位时补充页面封面）
 - [JMComic-Crawler-Python](https://github.com/hect0x7/JMComic-Crawler-Python)（JM 搜索、详情与下载）
-- 用户配置的自定义图片 API
 
 ---
 

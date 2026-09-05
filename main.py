@@ -7,9 +7,11 @@ import base64
 import importlib
 import io
 import json
+import os
 import random
 import re
 import shutil
+import socket
 import time
 import zipfile
 from collections.abc import AsyncGenerator
@@ -20,7 +22,6 @@ from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
-
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
@@ -40,30 +41,24 @@ DEFAULT_CONFIG = {
     "keyword_match_mode": "exact",
     "block_other_handlers": True,
     "cooldown_seconds": 0,
-    "image_source": "custom",
+    "image_source": "lolicon",
     "image_source_order": [],
     "request_retry_count": 3,
-    "custom_api_url": "",
-    "custom_api_image_url_path": "url",
-    "custom_api_tag_parameter": "tag",
-    "waifu_im_nsfw_mode": "r18",
-    "waifu_im_excluded_tags": [],
-    "waifu_im_orientation": "",
-    "nekos_api_rating": "露骨",
+    "enable_lolicon": True,
     "lolicon_r18_mode": "r18",
     "lolicon_exclude_ai": True,
     "lolicon_aspect_ratio": "",
     "lolicon_image_size": "small",
     "lolicon_proxy": "",
     "lolicon_proxy_order": [
-        "https://i.loli.best",
-        "https://pixiv.cat",
-        "https://i.pixiv.nl",
         "https://i.pixiv.re",
+        "https://i.pixiv.nl",
+        "https://i.loli.best",
     ],
-    "lolicon_proxy_timeout_seconds": 12,
+    "lolicon_proxy_timeout_seconds": 30,
     "lolicon_tag_aliases": "",
     "show_pixiv_pid": False,
+    "enable_jable": True,
     "jable_show_cover": True,
     "jable_show_code": True,
     "jable_show_title": True,
@@ -71,6 +66,7 @@ DEFAULT_CONFIG = {
     "jable_show_themes": True,
     "jable_show_detail_link": True,
     "jina_api_key": "",
+    "enable_jm": True,
     "jm_client_type": "api",
     "jm_cookies": "",
     "jm_cooldown_seconds": 0,
@@ -82,12 +78,12 @@ DEFAULT_CONFIG = {
     "jm_max_concurrent_images": 5,
     "jm_search_page_size": 5,
     "jm_auto_delete_after_send": True,
-    "jm_reply_as_forward": False,
     "wallhaven_api_key": "",
     "wallhaven_categories": ["动漫"],
     "wallhaven_purity": ["成人"],
     "wallhaven_sorting": "最新",
     "wallhaven_tags": [],
+    "use_forward": False,
     "auto_recall": False,
     "recall_delay_seconds": 60,
     "bypass_mode": "transform",
@@ -98,8 +94,6 @@ DEFAULT_CONFIG = {
     "bypass_jpeg_quality": 90,
     "bypass_hue_shift": 0,
     "bypass_brightness": 1.0,
-    "multi_image_send_mode": "direct",
-    "single_image_forward": False,
     "fetching_message": "正在获取喵~",
     "cooldown_message": "冷却中呢喵~",
     "group_disabled_message": "本喵暂时不提供此服务喵~",
@@ -114,10 +108,7 @@ CONFIG_GROUPS = (
     "lolicon_settings",
     "jable_settings",
     "jm_settings",
-    "custom_api_settings",
     "wallhaven_settings",
-    "waifu_im_settings",
-    "nekos_api_settings",
 )
 CHINESE_IMAGE_COUNTS = {
     "一": 1,
@@ -135,6 +126,20 @@ CHINESE_IMAGE_COUNTS = {
 MAX_IMAGES_PER_REQUEST = 5  # ponytail: fixed cap; make configurable if needed.
 MAX_MISSAV_MAGNETS = 5  # ponytail: fixed chat-safe cap; add ranges if requested.
 MAX_LOLICON_TAG_GROUPS = 8  # 标签组合上限，避免同义展开后请求体过大。
+
+# 这些域名直连（走代理会触发 TLS 握手异常，或国内可直连无需代理）；
+# 其余域名（如 r.jina.ai、missav.ws）通过 trust_env 读取 HTTP(S)_PROXY 走代理，
+# 用于访问被墙资源。带前导点表示同时匹配该域及其子域。
+_DIRECT_PROXY_DOMAINS = (
+    ".pixiv.net",
+    ".pximg.net",
+    ".loli.best",
+    ".pixiv.nl",
+    ".pixiv.re",
+    ".lolicon.app",
+    ".wallhaven.cc",
+    ".microlink.io",
+)
 
 # 常见中文标签 → Lolicon 候选标签（同义候选为 OR 关系，命中任意一个即可）。
 # 错误的候选不会拖累结果：Lolicon 的多组标签按 OR 匹配。
@@ -300,6 +305,26 @@ class CrimsonCosmosPlugin(Star):
             await self._session.close()
         self._session = None
 
+    @staticmethod
+    def _make_session() -> aiohttp.ClientSession:
+        """创建按域名分流的会话：Pixiv 等直连，被墙域名（如 r.jina.ai）走代理。
+
+        部署环境的容器内 ``HTTP(S)_PROXY`` 指向代理，对 Pixiv 域名会触发 TLS
+        握手异常（unexpected eof），且宿主机无全局 IPv6 路由，因此：
+        - 强制 IPv4（TCPConnector family=AF_INET）；
+        - 将直连域名注入 no_proxy 环境变量，aiohttp 对其直连；
+        - 其余域名（如 r.jina.ai）通过 trust_env 读取 HTTP(S)_PROXY 走代理。
+        """
+        direct = ",".join(_DIRECT_PROXY_DOMAINS)
+        existing = os.environ.get("no_proxy", "").strip()
+        merged = f"{existing},{direct}" if existing else direct
+        os.environ["no_proxy"] = merged
+        os.environ["NO_PROXY"] = merged
+        return aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(family=socket.AF_INET),
+            trust_env=True,
+        )
+
     def _is_event_allowed(self, event: AstrMessageEvent) -> bool:
         """Check the plugin's existing private and group access settings.
 
@@ -355,7 +380,9 @@ class CrimsonCosmosPlugin(Star):
         except (TypeError, ValueError):
             page = 0
         if not keyword or page < 1:
-            yield event.plain_result("用法：/jm 搜索 <关键词> [页码]")
+            result = await self._text_result(event, "用法：/jm 搜索 <关键词> [页码]")
+            if result is not None:
+                yield result
             return
         async for result in self._handle_jm_action(event, "search", keyword, page):
             yield result
@@ -367,7 +394,9 @@ class CrimsonCosmosPlugin(Star):
             return
         album_id = str(album_id).strip()
         if not album_id.isdigit():
-            yield event.plain_result("用法：/jm 详情 <数字ID>")
+            result = await self._text_result(event, "用法：/jm 详情 <数字ID>")
+            if result is not None:
+                yield result
             return
         async for result in self._handle_jm_action(event, "info", album_id):
             yield result
@@ -393,7 +422,9 @@ class CrimsonCosmosPlugin(Star):
         except (TypeError, ValueError):
             page = 0
         if period_key is None or page < 1:
-            yield event.plain_result("用法：/jm 热门 [日|周|月] [页码]")
+            result = await self._text_result(event, "用法：/jm 热门 [日|周|月] [页码]")
+            if result is not None:
+                yield result
             return
         async for result in self._handle_jm_action(event, "hot", period_key, page):
             yield result
@@ -405,7 +436,9 @@ class CrimsonCosmosPlugin(Star):
             return
         album_id = str(album_id).strip()
         if not album_id.isdigit():
-            yield event.plain_result("用法：/jm 下载 <数字ID>")
+            result = await self._text_result(event, "用法：/jm 下载 <数字ID>")
+            if result is not None:
+                yield result
             return
         async for result in self._handle_jm_action(event, "download", album_id):
             yield result
@@ -424,6 +457,13 @@ class CrimsonCosmosPlugin(Star):
             Text, cover, or ZIP results.
         """
         if not self._is_event_allowed(event):
+            return
+        if not self._config.get("enable_jm", True):
+            result = await self._text_result(event, "JM 本子功能已关闭。")
+            if result is not None:
+                yield result
+            if self._config.get("block_other_handlers", True):
+                event.stop_event()
             return
         try:
             cooldown_seconds = max(
@@ -454,19 +494,25 @@ class CrimsonCosmosPlugin(Star):
                     self._config.get("cooldown_message", "") or ""
                 ).strip()
                 if cooldown_message:
-                    yield event.plain_result(cooldown_message)
+                    result = await self._text_result(event, cooldown_message)
+                    if result is not None:
+                        yield result
                 if self._config.get("block_other_handlers", True):
                     event.stop_event()
                 return
             cooldowns[cooldown_key] = now + cooldown_seconds
         fetching_message = str(self._config.get("fetching_message", "") or "").strip()
         if fetching_message:
-            yield event.plain_result(fetching_message)
+            result = await self._text_result(event, fetching_message)
+            if result is not None:
+                yield result
 
         try:
             result = await asyncio.to_thread(self._execute_jm_action, action, *args)
         except RuntimeError as error:
-            yield event.plain_result(str(error))
+            error_result = await self._text_result(event, str(error))
+            if error_result is not None:
+                yield error_result
             if self._config.get("block_other_handlers", True):
                 event.stop_event()
             return
@@ -474,7 +520,11 @@ class CrimsonCosmosPlugin(Star):
             logger.warning(
                 "[CrimsonCosmos] JM action failed: %s", action, exc_info=True
             )
-            yield event.plain_result("JM 获取失败，请检查网络、域名或代理配置。")
+            error_result = await self._text_result(
+                event, "JM 获取失败，请检查网络、域名或代理配置。"
+            )
+            if error_result is not None:
+                yield error_result
             if self._config.get("block_other_handlers", True):
                 event.stop_event()
             return
@@ -484,7 +534,7 @@ class CrimsonCosmosPlugin(Star):
             image_file = Path(str(image_path)).resolve()
             encoded_cover = base64.b64encode(image_file.read_bytes()).decode("ascii")
             image_url = f"base64://{encoded_cover}"
-            if self._config.get("jm_reply_as_forward", False):
+            if self._config.get("use_forward", False):
                 # OneBot forward nodes commonly reject base64:// images; use a
                 # local file URI for the chat-record request instead.
                 image_url = image_file.as_uri()
@@ -518,7 +568,9 @@ class CrimsonCosmosPlugin(Star):
                     [Plain(text), File(name=Path(file_path).name, file=str(file_path))]
                 )
         else:
-            yield event.plain_result(text)
+            text_result = await self._text_result(event, text)
+            if text_result is not None:
+                yield text_result
 
         if self._config.get("jm_auto_delete_after_send", True):
             for path in result.get("cleanup", []):
@@ -835,7 +887,7 @@ class CrimsonCosmosPlugin(Star):
         parsed = urlsplit(image_ref)
         if parsed.scheme in {"http", "https"}:
             if self._session is None or self._session.closed:
-                self._session = aiohttp.ClientSession()
+                self._session = self._make_session()
             async with self._session.get(
                 image_ref, timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
@@ -854,9 +906,7 @@ class CrimsonCosmosPlugin(Star):
         if parsed.netloc:
             path_value = f"//{parsed.netloc}{parsed.path}"
         elif (
-            path_value.startswith("/")
-            and len(path_value) > 2
-            and path_value[2] == ":"
+            path_value.startswith("/") and len(path_value) > 2 and path_value[2] == ":"
         ):
             # Windows file:///C:/... URI: drop the leading slash.
             path_value = path_value[1:]
@@ -878,9 +928,7 @@ class CrimsonCosmosPlugin(Star):
             data = await self._load_image_bytes(image_ref)
             processed = await asyncio.to_thread(self._perturb_image, data, cfg)
         except Exception:
-            logger.warning(
-                "[CrimsonCosmos] 过审处理失败，回退发送原图", exc_info=True
-            )
+            logger.warning("[CrimsonCosmos] 过审处理失败，回退发送原图", exc_info=True)
             return ("image", image_ref)
         as_file = cfg["mode"] in {"file", "transform_file"}
         if not as_file:
@@ -890,9 +938,7 @@ class CrimsonCosmosPlugin(Star):
             )
         temporary_dir = Path(get_astrbot_temp_path())
         temporary_dir.mkdir(parents=True, exist_ok=True)
-        temporary_path = temporary_dir / (
-            f"crimson_cosmos_bypass_{time.time_ns()}.jpg"
-        )
+        temporary_path = temporary_dir / (f"crimson_cosmos_bypass_{time.time_ns()}.jpg")
         temporary_path.write_bytes(processed)
         return ("file", str(temporary_path.resolve()))
 
@@ -945,6 +991,105 @@ class CrimsonCosmosPlugin(Star):
             await self._prepare_image_ref(image_ref), text
         )
 
+    async def _send_onebot_segments(
+        self,
+        event: AstrMessageEvent,
+        segments: list[dict[str, Any]],
+        *,
+        as_forward: bool,
+    ) -> bool | None:
+        """通过 OneBot 发送消息段，并按全局配置安排撤回。
+
+        返回 ``None`` 表示当前事件没有可用的 OneBot 发送能力，调用方应
+        回退 AstrBot 普通结果；返回 ``False`` 表示尝试发送但失败。
+        """
+        bot = getattr(event, "bot", None)
+        if bot is None or not callable(getattr(bot, "call_action", None)):
+            return None
+
+        routing_params: dict[str, Any] = {}
+        raw_event = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        get_raw_value = getattr(raw_event, "get", None)
+        if callable(get_raw_value) and (self_id := get_raw_value("self_id")):
+            routing_params["self_id"] = self_id
+
+        if event.is_private_chat():
+            target_id = str(event.get_sender_id()).strip()
+            if not target_id.isdigit():
+                return None
+            recipient = {"user_id": int(target_id)}
+            action = "send_private_forward_msg" if as_forward else "send_private_msg"
+        else:
+            target_id = str(event.get_group_id()).strip()
+            if not target_id.isdigit():
+                return None
+            recipient = {"group_id": int(target_id)}
+            action = "send_group_forward_msg" if as_forward else "send_group_msg"
+
+        try:
+            if as_forward:
+                try:
+                    uin = int(routing_params.get("self_id", 0))
+                except (TypeError, ValueError):
+                    uin = 0
+                response = await bot.call_action(
+                    action,
+                    **recipient,
+                    messages=[
+                        {
+                            "type": "node",
+                            "data": {
+                                "name": "聊天记录",
+                                "uin": uin,
+                                "content": segments,
+                            },
+                        }
+                    ],
+                    **routing_params,
+                )
+            else:
+                response = await bot.call_action(
+                    action,
+                    **recipient,
+                    message=segments,
+                    **routing_params,
+                )
+        except Exception:
+            logger.warning("[CrimsonCosmos] OneBot message send failed", exc_info=True)
+            return False
+
+        if self._config.get("auto_recall", False):
+            message_id = (
+                response.get("message_id") if isinstance(response, dict) else None
+            )
+            if message_id is None:
+                logger.warning("[CrimsonCosmos] Sent message ID is unavailable")
+            else:
+                delay = self._recall_delay_seconds()
+                self._schedule_recall(
+                    bot,
+                    {
+                        "message_id": message_id,
+                        "due_at": time.time() + delay,
+                        "routing_params": routing_params,
+                    },
+                )
+        return True
+
+    async def _text_result(self, event: AstrMessageEvent, text: str) -> Any | None:
+        """应用全局发送选项；需要普通回退时返回 AstrBot 文本结果。"""
+        if not (
+            self._config.get("use_forward", False)
+            or self._config.get("auto_recall", False)
+        ):
+            return event.plain_result(text)
+        sent = await self._send_onebot_segments(
+            event,
+            [{"type": "text", "data": {"text": text}}],
+            as_forward=bool(self._config.get("use_forward", False)),
+        )
+        return None if sent is True else event.plain_result(text)
+
     async def _send_file_with_auto_recall(
         self, event: AstrMessageEvent, file_path: Path, text: str
     ) -> bool:
@@ -958,59 +1103,18 @@ class CrimsonCosmosPlugin(Star):
         Returns:
             Whether the file was sent through a recall-capable adapter.
         """
-        bot = getattr(event, "bot", None)
-        if bot is None or not callable(getattr(bot, "call_action", None)):
-            return False
-        routing_params: dict[str, Any] = {}
-        raw_event = getattr(getattr(event, "message_obj", None), "raw_message", None)
-        get_raw_value = getattr(raw_event, "get", None)
-        if callable(get_raw_value) and (self_id := get_raw_value("self_id")):
-            routing_params["self_id"] = self_id
-        if event.is_private_chat():
-            user_id = str(event.get_sender_id()).strip()
-            if not user_id.isdigit():
-                return False
-            action = "send_private_msg"
-            recipient = {"user_id": int(user_id)}
-        else:
-            group_id = str(event.get_group_id()).strip()
-            if not group_id.isdigit():
-                return False
-            action = "send_group_msg"
-            recipient = {"group_id": int(group_id)}
-        try:
-            response = await bot.call_action(
-                action,
-                **recipient,
-                message=[
-                    {"type": "text", "data": {"text": text}},
-                    {
-                        "type": "file",
-                        "data": {"name": file_path.name, "file": str(file_path)},
-                    },
-                ],
-                **routing_params,
-            )
-        except Exception:
-            logger.warning(
-                "[CrimsonCosmos] Auto-recall JM file send failed", exc_info=True
-            )
-            return False
-        message_id = response.get("message_id") if isinstance(response, dict) else None
-        if self._config.get("auto_recall", False) and message_id is not None:
-            try:
-                delay = max(0.0, float(self._config.get("recall_delay_seconds", 60)))
-            except (TypeError, ValueError):
-                delay = 60.0
-            self._schedule_recall(
-                bot,
+        sent = await self._send_onebot_segments(
+            event,
+            [
+                {"type": "text", "data": {"text": text}},
                 {
-                    "message_id": message_id,
-                    "due_at": time.time() + delay,
-                    "routing_params": routing_params,
+                    "type": "file",
+                    "data": {"name": file_path.name, "file": str(file_path)},
                 },
-            )
-        return True
+            ],
+            as_forward=bool(self._config.get("use_forward", False)),
+        )
+        return sent is True
 
     @filter.command_group("av")
     def av(self):
@@ -1020,7 +1124,7 @@ class CrimsonCosmosPlugin(Star):
     @filter.command("helpav")
     async def helpav(self, event: AstrMessageEvent):
         """显示插件所有参考命令。"""
-        yield event.plain_result(
+        text = (
             "R18 图片与本子查询总帮助\n\n"
             "/helpav\n\n"
             "图片：\n"
@@ -1048,6 +1152,9 @@ class CrimsonCosmosPlugin(Star):
             "主题和女优排序：近期最佳、最近更新、最多观看、最高收藏\n"
             "AV 排名范围：1-30；连续获取每次最多 10 部。"
         )
+        result = await self._text_result(event, text)
+        if result is not None:
+            yield result
 
     async def _handle_jable_command(
         self, event: AstrMessageEvent, message: str
@@ -1055,22 +1162,33 @@ class CrimsonCosmosPlugin(Star):
         """Handle a registered AV command with plugin access controls."""
         if not self._is_event_allowed(event):
             return
-
         block_other_handlers = self._config.get("block_other_handlers", True)
+        if not self._config.get("enable_jable", True):
+            result = await self._text_result(event, "Jable 影片查询已关闭。")
+            if result is not None:
+                yield result
+            if block_other_handlers:
+                event.stop_event()
+            return
         jable_request = self._parse_jable_request(message)
         if jable_request is None:
-            yield event.plain_result(
+            text = (
                 "用法：/av 热门 今日|本周|本月|全部 1-30、"
                 "/av 新片 1-30、/av 主题|女优 名称 "
                 "[近期最佳|最近更新|最多观看|最高收藏] 1-30"
             )
+            result = await self._text_result(event, text)
+            if result is not None:
+                yield result
             if block_other_handlers:
                 event.stop_event()
             return
 
         fetching_message = str(self._config.get("fetching_message", "") or "").strip()
         if fetching_message:
-            yield event.plain_result(fetching_message)
+            result = await self._text_result(event, fetching_message)
+            if result is not None:
+                yield result
         target_url, rank_request, list_name = jable_request
         ranks = (
             list(range(rank_request[0], rank_request[1] + 1))
@@ -1110,7 +1228,11 @@ class CrimsonCosmosPlugin(Star):
         if not videos:
             logger.warning("[CrimsonCosmos] Jable request failed")
             failure_message = str(self._config.get("failure_message", "") or "").strip()
-            yield event.plain_result(failure_message or "影片获取失败，请稍后重试。")
+            result = await self._text_result(
+                event, failure_message or "影片获取失败，请稍后重试。"
+            )
+            if result is not None:
+                yield result
             if block_other_handlers:
                 event.stop_event()
             return
@@ -1133,9 +1255,10 @@ class CrimsonCosmosPlugin(Star):
             reports.append("\n".join(report_lines))
 
         show_cover = bool(self._config.get("jable_show_cover", True))
+        use_forward = bool(self._config.get("use_forward", False))
         sent_as_forward = (
             show_cover
-            and len(videos) > 1
+            and use_forward
             and await self._send_forward_images(
                 event, [video["cover"] for video in videos], reports
             )
@@ -1151,7 +1274,9 @@ class CrimsonCosmosPlugin(Star):
                     )
         elif not show_cover:
             for report in reports:
-                yield event.plain_result(report)
+                result = await self._text_result(event, report)
+                if result is not None:
+                    yield result
         if block_other_handlers:
             event.stop_event()
 
@@ -1216,26 +1341,41 @@ class CrimsonCosmosPlugin(Star):
         if not self._is_event_allowed(event):
             return
         block_other_handlers = self._config.get("block_other_handlers", True)
+        if not self._config.get("enable_jable", True):
+            result = await self._text_result(event, "Jable 影片查询已关闭。")
+            if result is not None:
+                yield result
+            if block_other_handlers:
+                event.stop_event()
+            return
         keyword = str(keyword).strip()
         try:
             rank = int(rank)
         except (TypeError, ValueError):
             rank = 0
         if not keyword or not 1 <= rank <= 30:
-            yield event.plain_result("用法：/av 搜索 <关键词> [1-30]")
+            result = await self._text_result(event, "用法：/av 搜索 <关键词> [1-30]")
+            if result is not None:
+                yield result
             if block_other_handlers:
                 event.stop_event()
             return
 
         fetching_message = str(self._config.get("fetching_message", "") or "").strip()
         if fetching_message:
-            yield event.plain_result(fetching_message)
+            result = await self._text_result(event, fetching_message)
+            if result is not None:
+                yield result
         try:
             video = await self._fetch_missav_video(keyword, rank)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as error:
             logger.warning("[CrimsonCosmos] MissAV search failed: %s", error)
             failure_message = str(self._config.get("failure_message", "") or "").strip()
-            yield event.plain_result(failure_message or "影片获取失败，请稍后重试。")
+            result = await self._text_result(
+                event, failure_message or "影片获取失败，请稍后重试。"
+            )
+            if result is not None:
+                yield result
             if block_other_handlers:
                 event.stop_event()
             return
@@ -1246,13 +1386,22 @@ class CrimsonCosmosPlugin(Star):
             f"标题：{video['title']}\n"
             f"链接：{video['url']}"
         )
-        delivery_status = await self._send_image_with_auto_recall(
-            event, video["cover"], report
-        )
-        if delivery_status is None:
-            yield event.chain_result(
-                await self._build_image_components(video["cover"], report)
+        if self._config.get("use_forward", False):
+            forward_status = await self._send_forward_images(
+                event, [video["cover"]], [report]
             )
+            if forward_status is not True:
+                yield event.chain_result(
+                    await self._build_image_components(video["cover"], report)
+                )
+        else:
+            delivery_status = await self._send_image_with_auto_recall(
+                event, video["cover"], report
+            )
+            if delivery_status is None:
+                yield event.chain_result(
+                    await self._build_image_components(video["cover"], report)
+                )
         if block_other_handlers:
             event.stop_event()
 
@@ -1270,6 +1419,13 @@ class CrimsonCosmosPlugin(Star):
         if not self._is_event_allowed(event):
             return
         block_other_handlers = self._config.get("block_other_handlers", True)
+        if not self._config.get("enable_jable", True):
+            result = await self._text_result(event, "Jable 影片查询已关闭。")
+            if result is not None:
+                yield result
+            if block_other_handlers:
+                event.stop_event()
+            return
         target = str(target).strip()
         if target.startswith(("http://", "https://")):
             parsed = urlsplit(target)
@@ -1281,14 +1437,20 @@ class CrimsonCosmosPlugin(Star):
         else:
             valid_target = bool(target) and "://" not in target
         if not valid_target:
-            yield event.plain_result("用法：/av 磁力 <番号或 MissAV 详情链接>")
+            result = await self._text_result(
+                event, "用法：/av 磁力 <番号或 MissAV 详情链接>"
+            )
+            if result is not None:
+                yield result
             if block_other_handlers:
                 event.stop_event()
             return
 
         fetching_message = str(self._config.get("fetching_message", "") or "").strip()
         if fetching_message:
-            yield event.plain_result(fetching_message)
+            result = await self._text_result(event, fetching_message)
+            if result is not None:
+                yield result
         try:
             video = await self._fetch_missav_video(
                 target, prefer_exact=True, include_magnets=True
@@ -1296,7 +1458,11 @@ class CrimsonCosmosPlugin(Star):
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as error:
             logger.warning("[CrimsonCosmos] MissAV magnet request failed: %s", error)
             failure_message = str(self._config.get("failure_message", "") or "").strip()
-            yield event.plain_result(failure_message or "磁力获取失败，请稍后重试。")
+            result = await self._text_result(
+                event, failure_message or "磁力获取失败，请稍后重试。"
+            )
+            if result is not None:
+                yield result
             if block_other_handlers:
                 event.stop_event()
             return
@@ -1305,7 +1471,9 @@ class CrimsonCosmosPlugin(Star):
             f"{index}. {magnet}"
             for index, magnet in enumerate(video["magnets"], start=1)
         )
-        yield event.plain_result(f"🧲 {video['title']}\n{magnets}")
+        result = await self._text_result(event, f"🧲 {video['title']}\n{magnets}")
+        if result is not None:
+            yield result
         if block_other_handlers:
             event.stop_event()
 
@@ -1339,13 +1507,19 @@ class CrimsonCosmosPlugin(Star):
                     self._config.get("group_disabled_message", "") or ""
                 ).strip()
                 if group_disabled_message:
-                    yield event.plain_result(group_disabled_message)
+                    result = await self._text_result(event, group_disabled_message)
+                    if result is not None:
+                        yield result
                 if block_other_handlers:
                     event.stop_event()
             return
         image_count, message_tags = request
         if image_count > MAX_IMAGES_PER_REQUEST:
-            yield event.plain_result(f"单次最多获取 {MAX_IMAGES_PER_REQUEST} 张图片。")
+            result = await self._text_result(
+                event, f"单次最多获取 {MAX_IMAGES_PER_REQUEST} 张图片。"
+            )
+            if result is not None:
+                yield result
             if block_other_handlers:
                 event.stop_event()
             return
@@ -1382,7 +1556,9 @@ class CrimsonCosmosPlugin(Star):
                     self._config.get("cooldown_message", "") or ""
                 ).strip()
                 if cooldown_message:
-                    yield event.plain_result(cooldown_message)
+                    result = await self._text_result(event, cooldown_message)
+                    if result is not None:
+                        yield result
                 if block_other_handlers:
                     event.stop_event()
                 return
@@ -1390,11 +1566,13 @@ class CrimsonCosmosPlugin(Star):
 
         fetching_message = str(self._config.get("fetching_message", "") or "").strip()
         if fetching_message:
-            yield event.plain_result(fetching_message)
+            result = await self._text_result(event, fetching_message)
+            if result is not None:
+                yield result
 
         configured_sources = self._config.get("image_source_order", [])
         if not isinstance(configured_sources, list) or not configured_sources:
-            configured_sources = [self._config.get("image_source", "custom")]
+            configured_sources = [self._config.get("image_source", "lolicon")]
         sources = list(
             dict.fromkeys(
                 str(source).strip().lower()
@@ -1402,6 +1580,8 @@ class CrimsonCosmosPlugin(Star):
                 if str(source).strip()
             )
         )
+        if not self._config.get("enable_lolicon", True):
+            sources = [source for source in sources if source != "lolicon"]
         try:
             retry_count = min(
                 5, max(1, int(self._config.get("request_retry_count", 3)))
@@ -1419,30 +1599,11 @@ class CrimsonCosmosPlugin(Star):
                         image_urls = await self._fetch_wallhaven_images(
                             image_count, message_tags
                         )
-                    elif source == "custom":
-                        image_urls = list(
-                            await asyncio.gather(
-                                *(
-                                    self._fetch_custom_image(message_tags)
-                                    for _ in range(image_count)
-                                )
-                            )
-                        )
                         image_pids = []
                     elif source == "lolicon":
                         image_urls, image_pids = await self._fetch_lolicon_images(
                             image_count, message_tags
                         )
-                    elif source == "waifu_im":
-                        image_urls = await self._fetch_waifu_im_images(
-                            image_count, message_tags
-                        )
-                        image_pids = []
-                    elif source == "nekos_api":
-                        image_urls = await self._fetch_nekos_api_images(
-                            image_count, message_tags
-                        )
-                        image_pids = []
                     else:
                         raise ValueError("未知的图片来源配置。")
                     break
@@ -1458,13 +1619,27 @@ class CrimsonCosmosPlugin(Star):
                 break
 
         if image_urls is None:
-            failure_message = str(self._config.get("failure_message", "") or "").strip()
-            if failure_message:
-                yield event.plain_result(failure_message)
-            elif isinstance(last_error, ValueError):
-                yield event.plain_result(str(last_error))
+            if not sources:
+                result = await self._text_result(
+                    event,
+                    "所有图片来源均已关闭，请至少启用 Lolicon 或配置 Wallhaven。",
+                )
+                if result is not None:
+                    yield result
             else:
-                yield event.plain_result("图片获取失败，请稍后重试。")
+                failure_message = str(
+                    self._config.get("failure_message", "") or ""
+                ).strip()
+                if failure_message:
+                    result = await self._text_result(event, failure_message)
+                elif isinstance(last_error, ValueError):
+                    result = await self._text_result(event, str(last_error))
+                else:
+                    result = await self._text_result(
+                        event, "图片获取失败，请稍后重试。"
+                    )
+                if result is not None:
+                    yield result
             if block_other_handlers:
                 event.stop_event()
             return
@@ -1479,27 +1654,25 @@ class CrimsonCosmosPlugin(Star):
             if self._config.get("show_pixiv_pid", False) and image_pids
             else None
         )
-        forward_requested = (
-            len(image_urls) > 1
-            and self._config.get("multi_image_send_mode") == "forward"
-        ) or (
-            len(image_urls) == 1
-            and bool(self._config.get("single_image_forward", False))
-        )
+        use_forward = bool(self._config.get("use_forward", False))
         forward_texts = (
             [f"Pixiv PID: {pid}" for pid in image_pids]
-            if pid_text and forward_requested
+            if pid_text and use_forward
             else None
         )
         forward_status = (
             await self._send_forward_images(event, image_urls, forward_texts)
-            if forward_requested
+            if use_forward
             else None
         )
         if forward_status is False:
             self._cleanup_local_images(temp_paths)
             failure_message = str(self._config.get("failure_message", "") or "").strip()
-            yield event.plain_result(failure_message or "图片发送失败，请稍后重试。")
+            result = await self._text_result(
+                event, failure_message or "图片发送失败，请稍后重试。"
+            )
+            if result is not None:
+                yield result
             if block_other_handlers:
                 event.stop_event()
             return
@@ -1529,7 +1702,9 @@ class CrimsonCosmosPlugin(Star):
                 elif not delivery_status:
                     all_images_delivered = False
         if pid_text and not sent_as_forward and all_images_delivered:
-            yield event.plain_result(pid_text)
+            result = await self._text_result(event, pid_text)
+            if result is not None:
+                yield result
         self._cleanup_local_images(temp_paths)
         if block_other_handlers:
             event.stop_event()
@@ -1617,10 +1792,7 @@ class CrimsonCosmosPlugin(Star):
         if message_id is None:
             logger.warning("[CrimsonCosmos] Forward message ID is unavailable")
             return True
-        try:
-            delay = max(0.0, float(self._config.get("recall_delay_seconds", 60)))
-        except (TypeError, ValueError):
-            delay = 60.0
+        delay = self._recall_delay_seconds()
         self._schedule_recall(
             bot,
             {
@@ -1755,18 +1927,11 @@ class CrimsonCosmosPlugin(Star):
                 )
         if response is None:
             if failure_message:
-                try:
-                    await bot.call_action(
-                        action,
-                        **recipient,
-                        message=[{"type": "text", "data": {"text": failure_message}}],
-                        **routing_params,
-                    )
-                except Exception:
-                    logger.warning(
-                        "[CrimsonCosmos] Delivery failure notification send failed",
-                        exc_info=True,
-                    )
+                await self._send_onebot_segments(
+                    event,
+                    [{"type": "text", "data": {"text": failure_message}}],
+                    as_forward=bool(self._config.get("use_forward", False)),
+                )
                 return False
             return None
 
@@ -1778,10 +1943,7 @@ class CrimsonCosmosPlugin(Star):
             logger.warning("[CrimsonCosmos] Auto-recall message ID is unavailable")
             return True
 
-        try:
-            delay = max(0.0, float(self._config.get("recall_delay_seconds", 60)))
-        except (TypeError, ValueError):
-            delay = 60.0
+        delay = self._recall_delay_seconds()
         self._schedule_recall(
             bot,
             {
@@ -1791,6 +1953,16 @@ class CrimsonCosmosPlugin(Star):
             },
         )
         return True
+
+    def _recall_delay_seconds(self) -> float:
+        """返回自动撤回延迟（秒），限制在 2 分钟（120 秒）以内。"""
+        try:
+            return max(
+                0.0,
+                min(120.0, float(self._config.get("recall_delay_seconds", 60))),
+            )
+        except (TypeError, ValueError):
+            return 60.0
 
     def _schedule_recall(self, bot: Any, record: dict[str, Any]) -> None:
         """Persist and schedule one OneBot recall record.
@@ -2086,7 +2258,7 @@ class CrimsonCosmosPlugin(Star):
             ValueError: If MissAV returns an empty or challenge page.
         """
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = self._make_session()
         last_error: Exception = ValueError("MissAV 返回空页面。")
         for attempt in range(2):
             try:
@@ -2278,7 +2450,7 @@ class CrimsonCosmosPlugin(Star):
             ValueError: If the requested theme or ranked video cannot be parsed.
         """
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = self._make_session()
         target_url, rank, list_name = request[:3]
         listing_cache = request[3] if len(request) == 4 else {}
         timeout = aiohttp.ClientTimeout(total=30)
@@ -2453,153 +2625,6 @@ class CrimsonCosmosPlugin(Star):
             return count, tags
         return None
 
-    async def _fetch_custom_image(self, tags: list[str] | None = None) -> str:
-        """Fetch an image URL from the configured JSON API.
-
-        Returns:
-            A valid remote image URL from the configured JSON path.
-
-        Raises:
-            ValueError: If the API URL, JSON path, or resolved image URL is invalid.
-        """
-        api_url = str(self._config.get("custom_api_url") or "").strip()
-        if not api_url:
-            raise ValueError("请先配置自定义色图 API。")
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-
-        tag_parameter = str(
-            self._config.get("custom_api_tag_parameter", "tag") or ""
-        ).strip()
-        params = {tag_parameter: ",".join(tags)} if tags and tag_parameter else None
-        async with self._session.get(
-            api_url, params=params, timeout=aiohttp.ClientTimeout(total=20)
-        ) as response:
-            response.raise_for_status()
-            payload: Any = await response.json(content_type=None)
-
-        image_url: Any = payload
-        if not isinstance(payload, str):
-            path = str(self._config.get("custom_api_image_url_path") or "url").strip()
-            for part in path.split("."):
-                if isinstance(image_url, dict):
-                    image_url = image_url.get(part)
-                elif isinstance(image_url, list) and part.isdigit():
-                    index = int(part)
-                    image_url = image_url[index] if index < len(image_url) else None
-                else:
-                    image_url = None
-                if image_url is None:
-                    break
-
-        if not isinstance(image_url, str) or not image_url.startswith(
-            ("http://", "https://")
-        ):
-            raise ValueError("自定义 API 未返回有效的图片链接。")
-        return image_url
-
-    async def _fetch_waifu_im_images(
-        self, count: int, message_tags: list[str] | None = None
-    ) -> list[str]:
-        """Fetch filtered random images from Waifu.im.
-
-        Args:
-            count: Number of images to request.
-            message_tags: Tags parsed from the triggering message.
-
-        Returns:
-            Valid remote image URLs.
-
-        Raises:
-            ValueError: If Waifu.im returns an invalid or incomplete response.
-        """
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        nsfw_mode = str(self._config.get("waifu_im_nsfw_mode", "r18")).lower()
-        params: dict[str, Any] = {
-            "IsNsfw": {"sfw": "False", "r18": "True", "mix": "All"}.get(
-                nsfw_mode, "True"
-            ),
-            "OrderBy": "RANDOM",
-            "PageSize": str(count),
-        }
-        if message_tags:
-            params["IncludedTags"] = message_tags
-        excluded_tags = self._config.get("waifu_im_excluded_tags", [])
-        if isinstance(excluded_tags, list) and excluded_tags:
-            params["ExcludedTags"] = [
-                str(tag).strip() for tag in excluded_tags if str(tag).strip()
-            ]
-        orientation = str(self._config.get("waifu_im_orientation", "")).lower()
-        if orientation in {"portrait", "landscape", "square"}:
-            params["Orientation"] = orientation.upper()
-        async with self._session.get(
-            "https://api.waifu.im/images",
-            params=params,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as response:
-            response.raise_for_status()
-            body: Any = await response.json(content_type=None)
-        items = body.get("items") if isinstance(body, dict) else None
-        urls = [
-            item["url"]
-            for item in items or []
-            if isinstance(item, dict)
-            and isinstance(item.get("url"), str)
-            and item["url"].startswith(("http://", "https://"))
-        ]
-        if len(urls) != count:
-            raise ValueError("Waifu.im 未返回足够的可用图片。")
-        return urls
-
-    async def _fetch_nekos_api_images(
-        self, count: int, message_tags: list[str] | None = None
-    ) -> list[str]:
-        """Fetch random filtered images from Nekos API v5.
-
-        Args:
-            count: Number of images to request.
-            message_tags: Tags parsed from the triggering message.
-
-        Returns:
-            Valid remote image URLs.
-
-        Raises:
-            ValueError: If Nekos API returns an invalid image URL.
-        """
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        configured_rating = str(self._config.get("nekos_api_rating", "露骨")).lower()
-        rating = {
-            "安全": "safe",
-            "暗示": "suggestive",
-            "边缘": "borderline",
-            "露骨": "explicit",
-            "safe": "safe",
-            "suggestive": "suggestive",
-            "borderline": "borderline",
-            "explicit": "explicit",
-        }.get(configured_rating, "explicit")
-        params: dict[str, Any] = {"rating": rating}
-        if message_tags:
-            params["tag"] = message_tags[:5]
-        async def fetch_one() -> str:
-            async with self._session.get(
-                "https://api.nekosapi.com/v5/images/random",
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                response.raise_for_status()
-                body: Any = await response.json(content_type=None)
-            image_url = body.get("url") if isinstance(body, dict) else None
-            if not isinstance(image_url, str) or not image_url.startswith(
-                ("http://", "https://")
-            ):
-                raise ValueError("Nekos API 未返回有效的图片链接。")
-            return image_url
-
-        return list(await asyncio.gather(*(fetch_one() for _ in range(count))))
-
     async def _fetch_wallhaven_images(
         self, count: int, message_tags: list[str] | None = None
     ) -> list[str]:
@@ -2656,7 +2681,7 @@ class CrimsonCosmosPlugin(Star):
         ]
         tag_query = " ".join([*configured_tags, *(message_tags or [])])
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = self._make_session()
 
         sorting_modes = {
             "最新": ("date_added", None),
@@ -2775,7 +2800,7 @@ class CrimsonCosmosPlugin(Star):
     async def _request_lolicon_data(self, payload: dict[str, Any]) -> list[Any]:
         """发送一次 Lolicon 请求并返回其 ``data`` 列表。"""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = self._make_session()
         async with self._session.post(
             "https://api.lolicon.app/setu/v2",
             json=payload,
@@ -2851,9 +2876,7 @@ class CrimsonCosmosPlugin(Star):
 
         images = await self._request_lolicon_data(build_payload(True))
         if len(images) < count and tag_groups:
-            logger.warning(
-                "[CrimsonCosmos] Lolicon 标签无足够结果，回退为无标签请求"
-            )
+            logger.warning("[CrimsonCosmos] Lolicon 标签无足够结果，回退为无标签请求")
             images = await self._request_lolicon_data(build_payload(False))
 
         async def fetch_image(image: Any) -> tuple[str, str] | None:
@@ -2889,9 +2912,7 @@ class CrimsonCosmosPlugin(Star):
                 "i.pixiv.nl",
                 "i.pixiv.re",
             }
-            proxy_candidates = (
-                proxy_order if parsed_url.hostname in pixiv_hosts else []
-            )
+            proxy_candidates = proxy_order if parsed_url.hostname in pixiv_hosts else []
             for proxy in dict.fromkeys(
                 str(item).strip().rstrip("/") for item in proxy_candidates
             ):
@@ -2920,8 +2941,8 @@ class CrimsonCosmosPlugin(Star):
             timeout_seconds = max(
                 1,
                 min(
-                    int(self._config.get("lolicon_proxy_timeout_seconds", 8) or 8),
-                    30,
+                    int(self._config.get("lolicon_proxy_timeout_seconds", 30) or 30),
+                    60,
                 ),
             )
             download_headers = {
@@ -2953,9 +2974,7 @@ class CrimsonCosmosPlugin(Star):
                                 ):
                                     total += len(chunk)
                                     if total > 20 * 1024 * 1024:
-                                        raise ValueError(
-                                            "Pixiv 图片超过 20 MiB 限制。"
-                                        )
+                                        raise ValueError("Pixiv 图片超过 20 MiB 限制。")
                                     if len(leading) < 12:
                                         leading.extend(chunk[: 12 - len(leading)])
                                     handle.write(chunk)

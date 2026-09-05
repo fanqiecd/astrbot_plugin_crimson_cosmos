@@ -7,10 +7,9 @@ import importlib.util
 import json
 import sys
 import zipfile
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from types import SimpleNamespace
-
-import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -499,83 +498,6 @@ def test_should_return_three_wallhaven_images_for_a_chinese_quantity_request() -
     assert len(session.calls) == 1
 
 
-def test_should_request_custom_api_once_per_requested_image() -> None:
-    """Arabic quantity requests repeat the custom API request for every image."""
-    plugin, session = make_plugin(
-        {
-            "enable_group": True,
-            "enable_private": False,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "keyword_match_mode": "exact",
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-
-    results = asyncio.run(collect_results(plugin, FakeEvent("来3张色图")))
-
-    assert results == [("image", "https://images.example/custom.jpg")] * 3
-    assert session.calls == [("https://api.example/image", None)] * 3
-
-
-def test_should_reject_requests_above_the_multi_image_limit() -> None:
-    """Large quantity requests are rejected before requesting an image API."""
-    plugin, session = make_plugin(
-        {
-            "enable_group": True,
-            "enable_private": False,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "keyword_match_mode": "exact",
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-
-    results = asyncio.run(collect_results(plugin, FakeEvent("来6张色图")))
-
-    assert results == [("text", "单次最多获取 5 张图片。")]
-    assert session.calls == []
-
-
-def test_should_honor_channel_switches_group_allowlist_and_keyword_modes() -> None:
-    """Only configured chats and configured keyword forms receive an image."""
-    cases = [
-        ("exact", "色图", "10001", False, True),
-        ("exact", "来张色图", "10001", False, False),
-        ("prefix", "色图 来一张", "10001", False, True),
-        ("contains", "请来张色图", "10001", False, True),
-        ("exact", "色图", "99999", False, False),
-        ("exact", "色图", "", True, False),
-    ]
-
-    for mode, message, group_id, private, should_reply in cases:
-        plugin, session = make_plugin(
-            {
-                "enable_group": True,
-                "enable_private": False,
-                "allowed_group_ids": ["10001"],
-                "keywords": ["色图"],
-                "keyword_match_mode": mode,
-                "image_source": "custom",
-                "custom_api_url": "https://api.example/image",
-                "custom_api_image_url_path": "url",
-            },
-            {"url": "https://images.example/custom.jpg"},
-        )
-
-        results = asyncio.run(
-            collect_results(plugin, FakeEvent(message, group_id, private))
-        )
-
-        assert bool(results) is should_reply
-        assert bool(session.calls) is should_reply
-
-
 def test_should_show_configured_notice_when_disabled_group_matches_keyword() -> None:
     """A disabled group gets one controlled notice only after a keyword match."""
     plugin, session = make_plugin(
@@ -614,40 +536,6 @@ def test_should_expose_the_disabled_group_notice_in_message_settings() -> None:
     assert "群聊回复关闭且触发关键词时发送" in field["hint"]
 
 
-def test_should_apply_the_private_reply_allowlist_to_keyword_requests() -> None:
-    """Private replies permit everyone by default or only configured QQ users."""
-    cases = [
-        ([], "20001", True),
-        (["20001", 20002], "20002", True),
-        (["20001"], "29999", False),
-        ("20001", "20001", False),
-    ]
-
-    for allowed_user_ids, sender_id, should_reply in cases:
-        plugin, session = make_plugin(
-            {
-                "enable_private": True,
-                "allowed_private_user_ids": allowed_user_ids,
-                "keywords": ["色图"],
-                "keyword_match_mode": "exact",
-                "image_source": "custom",
-                "custom_api_url": "https://api.example/image",
-                "custom_api_image_url_path": "url",
-            },
-            {"url": "https://images.example/custom.jpg"},
-        )
-
-        results = asyncio.run(
-            collect_results(
-                plugin,
-                FakeEvent("色图", group_id="", private=True, sender_id=sender_id),
-            )
-        )
-
-        assert bool(results) is should_reply
-        assert bool(session.calls) is should_reply
-
-
 def test_should_parse_alias_tags_before_a_suffix_keyword(tmp_path: Path) -> None:
     """A tag directly before the keyword is converted through the alias map."""
     plugin, session = make_plugin(
@@ -680,36 +568,6 @@ def test_should_parse_alias_tags_before_a_suffix_keyword(tmp_path: Path) -> None
     assert session.post_calls[0][1]["tag"] == [["deepseek"]]
 
 
-def test_should_follow_custom_api_json_path_when_triggered() -> None:
-    """A configured dotted path makes common custom API payloads usable."""
-    plugin, session = make_plugin(
-        {
-            "enable_group": True,
-            "enable_private": False,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "keyword_match_mode": "exact",
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "data.0.urls.original",
-        },
-        {
-            "data": [
-                {
-                    "urls": {
-                        "original": "https://images.example/original.jpg",
-                    }
-                }
-            ]
-        },
-    )
-
-    results = asyncio.run(collect_results(plugin, FakeEvent("色图")))
-
-    assert results == [("image", "https://images.example/original.jpg")]
-    assert session.calls == [("https://api.example/image", None)]
-
-
 def test_should_merge_defaults_close_the_session_and_report_invalid_sources() -> None:
     """Construction and safe configuration failures do not leave a session open."""
     plugin = CrimsonCosmosPlugin(
@@ -732,116 +590,6 @@ def test_should_merge_defaults_close_the_session_and_report_invalid_sources() ->
     ]
     assert session.closed is True
     assert plugin._session is None
-
-
-def test_should_recall_auto_recall_images_after_the_configured_delay() -> None:
-    """Enabled auto-recall sends once and retracts the OneBot image message."""
-    plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "enable_private": False,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "keyword_match_mode": "exact",
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "auto_recall": True,
-            "recall_delay_seconds": 0,
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-
-    async def run() -> tuple[list[tuple[str, str]], FakeRecallBot]:
-        event = FakeRecallEvent("色图")
-        results = await collect_results(plugin, event)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        return results, event.bot
-
-    results, bot = asyncio.run(run())
-
-    assert results == []
-    assert bot.actions == [
-        (
-            "send_group_msg",
-            {
-                "group_id": 10001,
-                "message": [
-                    {
-                        "type": "image",
-                        "data": {"file": "https://images.example/custom.jpg"},
-                    }
-                ],
-            },
-        ),
-        ("delete_msg", {"message_id": 123}),
-    ]
-
-
-def test_should_send_failure_message_when_direct_image_delivery_fails() -> None:
-    """Direct image delivery failures send the configured plain-text prompt."""
-
-    class Bot:
-        def __init__(self) -> None:
-            self.actions: list[tuple[str, dict[str, object]]] = []
-
-        async def call_action(self, action: str, **kwargs: object) -> dict[str, int]:
-            self.actions.append((action, kwargs))
-            if len(self.actions) == 1:
-                raise RuntimeError("image delivery failed")
-            return {"message_id": 123}
-
-    class Event(FakeRecallEvent):
-        def __init__(self) -> None:
-            super().__init__("色图")
-            self.bot = Bot()
-
-    plugin, _session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "fetching_message": "",
-            "failure_message": "图片发送失败，请稍后重试。",
-            "auto_recall": False,
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-    event = Event()
-
-    results = asyncio.run(collect_results(plugin, event))
-
-    assert results == []
-    assert event.bot.actions == [
-        (
-            "send_group_msg",
-            {
-                "group_id": 10001,
-                "message": [
-                    {
-                        "type": "image",
-                        "data": {"file": "https://images.example/custom.jpg"},
-                    }
-                ],
-            },
-        ),
-        (
-            "send_group_msg",
-            {
-                "group_id": 10001,
-                "message": [
-                    {
-                        "type": "text",
-                        "data": {"text": "图片发送失败，请稍后重试。"},
-                    }
-                ],
-            },
-        ),
-    ]
 
 
 def test_should_retry_failed_base64_image_as_a_local_temp_file(tmp_path: Path) -> None:
@@ -969,195 +717,6 @@ def test_should_send_jm_file_directly_when_auto_recall_is_disabled(tmp_path) -> 
     )
 
 
-def test_should_pass_message_tags_to_wallhaven_and_custom_apis() -> None:
-    """Tags written in the command augment provider query parameters."""
-    wallhaven_plugin, wallhaven_session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "wallhaven",
-            "wallhaven_api_key": "test-key",
-            "wallhaven_categories": ["anime"],
-            "wallhaven_tags": ["configured"],
-        },
-        {"data": [{"path": "https://images.example/tagged.jpg"}]},
-    )
-    custom_plugin, custom_session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "custom_api_tag_parameter": "tags",
-        },
-        {"url": "https://images.example/tagged.jpg"},
-    )
-
-    asyncio.run(collect_results(wallhaven_plugin, FakeEvent("来一份白丝、猫耳色图")))
-    asyncio.run(collect_results(custom_plugin, FakeEvent("来一份白丝、猫耳色图")))
-
-    assert wallhaven_session.calls[0][1]["q"] == "configured 白丝 猫耳"
-    assert custom_session.calls == [
-        ("https://api.example/image", {"tags": "白丝,猫耳"})
-    ]
-
-
-def test_should_accept_tags_written_after_the_keyword() -> None:
-    """A keyword followed by tags remains a valid one-image request."""
-    plugin, session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "keyword_match_mode": "exact",
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "custom_api_tag_parameter": "tags",
-        },
-        {"url": "https://images.example/tagged.jpg"},
-    )
-
-    results = asyncio.run(collect_results(plugin, FakeEvent("色图 白丝 猫耳")))
-
-    assert results == [("image", "https://images.example/tagged.jpg")]
-    assert session.calls == [("https://api.example/image", {"tags": "白丝,猫耳"})]
-
-
-@pytest.mark.parametrize(
-    ("message", "expected_params"),
-    [
-        ("来个色图", None),
-        ("请给我来一张色图", None),
-        ("发我一张色图", None),
-        ("来个白丝色图", {"tags": "白丝"}),
-        ("给我发一张白丝、猫耳色图", {"tags": "白丝,猫耳"}),
-        ("色图 白丝 猫耳", {"tags": "白丝,猫耳"}),
-    ],
-)
-def test_should_parse_request_phrases_separately_from_image_tags(
-    message: str, expected_params: dict[str, str] | None
-) -> None:
-    """Request grammar is consumed before the remaining text becomes tags."""
-    plugin, session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "keyword_match_mode": "contains",
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "custom_api_tag_parameter": "tags",
-        },
-        {"url": "https://images.example/tagged.jpg"},
-    )
-
-    results = asyncio.run(collect_results(plugin, FakeEvent(message)))
-
-    assert results == [("image", "https://images.example/tagged.jpg")]
-    assert session.calls == [("https://api.example/image", expected_params)]
-
-
-def test_should_expose_resilience_settings_in_the_config_schema() -> None:
-    """AstrBot's config UI exposes the four newly supported controls."""
-    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-    sources = schema["source_settings"]["items"]
-    custom = schema["custom_api_settings"]["items"]
-
-    assert sources["image_source_order"]["default"] == []
-    assert sources["request_retry_count"]["default"] == 3
-    assert custom["custom_api_tag_parameter"]["default"] == "tag"
-
-
-def test_should_retry_and_fall_back_to_the_next_image_source() -> None:
-    """Transient failures retry before the next configured source is used."""
-    plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "image_source_order": ["custom", "wallhaven"],
-            "request_retry_count": 2,
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "wallhaven_api_key": "test-key",
-            "wallhaven_categories": ["anime"],
-        },
-        None,
-    )
-    session = RoutedSession(
-        {
-            "https://api.example/image": [
-                {"unexpected": True},
-                {"unexpected": True},
-            ],
-            "https://wallhaven.cc/api/v1/search": [
-                {"data": [{"path": "https://images.example/fallback.jpg"}]}
-            ],
-        }
-    )
-    plugin._session = session
-
-    results = asyncio.run(collect_results(plugin, FakeEvent("色图")))
-
-    assert results == [("image", "https://images.example/fallback.jpg")]
-    assert [call[0] for call in session.calls] == [
-        "https://api.example/image",
-        "https://api.example/image",
-        "https://wallhaven.cc/api/v1/search",
-    ]
-
-
-def test_should_restore_persisted_recall_tasks_after_reload(tmp_path: Path) -> None:
-    """A pending OneBot recall survives plugin termination and reload."""
-    task_file = tmp_path / "recall_tasks.json"
-    plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "auto_recall": True,
-            "recall_delay_seconds": 60,
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-    plugin._recall_tasks_path = task_file
-    plugin._recall_tasks = set()
-
-    async def schedule_and_stop() -> None:
-        await collect_results(plugin, FakeRecallEvent("色图"))
-        await plugin.terminate()
-
-    asyncio.run(schedule_and_stop())
-    records = json.loads(task_file.read_text(encoding="utf-8"))
-    records[0]["due_at"] = 0
-    task_file.write_text(json.dumps(records), encoding="utf-8")
-
-    restored, _ = make_plugin(plugin._config, {"url": "unused"})
-    restored._recall_tasks_path = task_file
-    restored._recall_tasks = set()
-
-    async def restore() -> FakeRecallBot:
-        event = FakeRecallEvent("not a trigger")
-        await collect_results(restored, event)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        return event.bot
-
-    bot = asyncio.run(restore())
-
-    assert bot.actions == [("delete_msg", {"message_id": 123})]
-    assert json.loads(task_file.read_text(encoding="utf-8")) == []
-
-
 def test_should_fetch_lolicon_images_with_filters_aliases_and_pid_output(
     tmp_path: Path,
 ) -> None:
@@ -1192,7 +751,9 @@ def test_should_fetch_lolicon_images_with_filters_aliases_and_pid_output(
     )
 
     with stub_temp_dir(tmp_path):
-        results = asyncio.run(collect_results(plugin, FakeEvent("来两份白丝、猫耳色图")))
+        results = asyncio.run(
+            collect_results(plugin, FakeEvent("来两份白丝、猫耳色图"))
+        )
 
     assert results[0][0] == "image"
     assert results[1][0] == "image"
@@ -1267,50 +828,6 @@ def test_should_fall_back_to_the_next_pixiv_image_proxy(tmp_path: Path) -> None:
     ]
 
 
-def test_should_fall_back_when_lolicon_returns_an_api_error() -> None:
-    """A Lolicon API error uses the existing source fallback chain."""
-    plugin, session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source_order": ["lolicon", "custom"],
-            "request_retry_count": 1,
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-        },
-        {"error": "rate limited"},
-    )
-    session.routes = {}
-
-    original_post = session.post
-
-    def post_once(*args: object, **kwargs: object) -> FakeResponse:
-        return original_post(*args, **kwargs)
-
-    session.post = post_once
-    session.payload = {"error": "rate limited"}
-
-    class FallbackResponse(FakeResponse):
-        pass
-
-    def get_fallback(
-        url: str,
-        *,
-        params: dict[str, str] | None = None,
-        timeout: object = None,
-    ) -> FakeResponse:
-        del timeout
-        session.calls.append((url, params))
-        return FallbackResponse({"url": "https://images.example/fallback.jpg"})
-
-    session.get = get_fallback
-
-    results = asyncio.run(collect_results(plugin, FakeEvent("色图")))
-
-    assert results == [("image", "https://images.example/fallback.jpg")]
-
-
 def test_should_expose_lolicon_settings_in_the_config_schema() -> None:
     """AstrBot's config UI exposes the supported Lolicon controls."""
     schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
@@ -1328,83 +845,7 @@ def test_should_expose_lolicon_settings_in_the_config_schema() -> None:
     assert "small 小尺寸" in image_size_hint
     assert "thumb 缩略图" in image_size_hint
     assert "mini 极小缩略图" in image_size_hint
-    assert lolicon["lolicon_proxy_order"]["default"][0] == "https://i.loli.best"
-
-
-def test_should_fetch_waifu_im_images_with_native_filters() -> None:
-    """Waifu.im receives content, tag, orientation, and count filters."""
-    plugin, session = make_plugin(
-        {
-            "waifu_im_nsfw_mode": "r18",
-            "waifu_im_excluded_tags": ["gif"],
-            "waifu_im_orientation": "portrait",
-        },
-        {
-            "items": [
-                {"url": "https://cdn.waifu.im/one.jpg"},
-                {"url": "https://cdn.waifu.im/two.jpg"},
-            ]
-        },
-    )
-
-    urls = asyncio.run(plugin._fetch_waifu_im_images(2, ["maid", "catgirl"]))
-
-    assert urls == [
-        "https://cdn.waifu.im/one.jpg",
-        "https://cdn.waifu.im/two.jpg",
-    ]
-    assert session.calls == [
-        (
-            "https://api.waifu.im/images",
-            {
-                "IsNsfw": "True",
-                "OrderBy": "RANDOM",
-                "PageSize": "2",
-                "IncludedTags": ["maid", "catgirl"],
-                "ExcludedTags": ["gif"],
-                "Orientation": "PORTRAIT",
-            },
-        )
-    ]
-
-
-def test_should_fetch_repeated_nekos_api_images_with_rating_and_tags() -> None:
-    """Nekos API performs one random request for every requested image."""
-    plugin, session = make_plugin(
-        {"nekos_api_rating": "露骨"},
-        {"url": "https://cdn.nekosapi.com/image.webp"},
-    )
-
-    urls = asyncio.run(plugin._fetch_nekos_api_images(2, ["Bikini"]))
-
-    assert urls == ["https://cdn.nekosapi.com/image.webp"] * 2
-    assert (
-        session.calls
-        == [
-            (
-                "https://api.nekosapi.com/v5/images/random",
-                {"rating": "explicit", "tag": ["Bikini"]},
-            )
-        ]
-        * 2
-    )
-
-
-def test_should_expose_all_recommended_native_image_sources() -> None:
-    """The WebUI exposes source choices and dedicated configuration cards."""
-    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-    sources = schema["source_settings"]["items"]
-
-    assert {"waifu_im", "nekos_api"}.issubset(sources["image_source"]["options"])
-    assert {"waifu_im", "nekos_api"}.issubset(sources["image_source_order"]["options"])
-    assert (
-        schema["waifu_im_settings"]["items"]["waifu_im_nsfw_mode"]["default"] == "r18"
-    )
-    nekos = schema["nekos_api_settings"]["items"]["nekos_api_rating"]
-    assert nekos["options"] == ["安全", "暗示", "边缘", "露骨"]
-    assert (
-        schema["nekos_api_settings"]["items"]["nekos_api_rating"]["default"] == "露骨"
-    )
+    assert lolicon["lolicon_proxy_order"]["default"][0] == "https://i.pixiv.re"
 
 
 def test_should_not_expose_removed_danbooru_source() -> None:
@@ -1437,92 +878,6 @@ def test_should_expose_chinese_wallhaven_filters_and_sorting_in_the_config_schem
     assert wallhaven["wallhaven_sorting"]["default"] == "最新"
 
 
-def test_should_group_config_cards_and_accept_nested_settings() -> None:
-    """The WebUI uses feature cards while runtime receives flat settings."""
-    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-    expected_groups = {
-        "access_settings",
-        "trigger_settings",
-        "delivery_settings",
-        "message_settings",
-        "source_settings",
-        "lolicon_settings",
-        "jable_settings",
-        "jm_settings",
-        "custom_api_settings",
-        "wallhaven_settings",
-        "waifu_im_settings",
-        "nekos_api_settings",
-    }
-
-    assert set(schema) == expected_groups
-    assert all(section["type"] == "object" for section in schema.values())
-    assert all(section["description"].startswith("【") for section in schema.values())
-
-    plugin = CrimsonCosmosPlugin(
-        None,
-        {
-            "access_settings": {"enable_group": True},
-            "source_settings": {"image_source": "lolicon"},
-            "lolicon_settings": {"lolicon_r18_mode": "mix"},
-            "jable_settings": {
-                "jable_show_cover": False,
-                "jable_show_detail_link": False,
-            },
-        },
-    )
-
-    assert plugin._config["enable_group"] is True
-    assert plugin._config["image_source"] == "lolicon"
-    assert plugin._config["lolicon_r18_mode"] == "mix"
-    assert plugin._config["jable_show_cover"] is False
-    assert plugin._config["jable_show_detail_link"] is False
-    assert plugin._config["enable_private"] is False
-
-
-def test_should_send_configurable_fetching_and_failure_messages() -> None:
-    """Matched requests announce work and report exhausted source failures."""
-    success_plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "fetching_message": "正在获取喵~",
-            "failure_message": "涩图获取失败了喵，请稍后再试~",
-        },
-        {"url": "https://images.example/success.jpg"},
-    )
-    failure_plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "request_retry_count": 1,
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "fetching_message": "正在获取喵~",
-            "failure_message": "涩图获取失败了喵，请稍后再试~",
-        },
-        {"unexpected": True},
-    )
-
-    success = asyncio.run(collect_results(success_plugin, FakeEvent("色图")))
-    failure = asyncio.run(collect_results(failure_plugin, FakeEvent("色图")))
-
-    assert success == [
-        ("text", "正在获取喵~"),
-        ("image", "https://images.example/success.jpg"),
-    ]
-    assert failure == [
-        ("text", "正在获取喵~"),
-        ("text", "涩图获取失败了喵，请稍后再试~"),
-    ]
-
-
 def test_should_expose_message_prompts_as_a_separate_config_card() -> None:
     """Fetching and failure prompts are editable in their own WebUI card."""
     schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
@@ -1530,90 +885,6 @@ def test_should_expose_message_prompts_as_a_separate_config_card() -> None:
 
     assert messages["fetching_message"]["default"] == "正在获取喵~"
     assert messages["failure_message"]["default"] == "涩图获取失败了喵，请稍后再试~"
-
-
-def test_should_return_cooldown_message_without_fetching_again() -> None:
-    """A repeated request from one user is blocked before the fetching prompt."""
-    plugin, session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "fetching_message": "正在获取喵~",
-            "cooldown_seconds": 60,
-            "cooldown_message": "冷却中呢喵~",
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-    event = FakeEvent("色图")
-
-    first_results = asyncio.run(collect_results(plugin, event))
-    second_results = asyncio.run(collect_results(plugin, event))
-
-    assert first_results == [
-        ("text", "正在获取喵~"),
-        ("image", "https://images.example/custom.jpg"),
-    ]
-    assert second_results == [("text", "冷却中呢喵~")]
-    assert len(session.calls) == 1
-    assert event.stopped is True
-
-
-def test_should_share_image_cooldown_between_users_in_the_same_group() -> None:
-    """One group cooldown blocks every ordinary user in that group."""
-    plugin, session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "cooldown_seconds": 60,
-            "cooldown_message": "冷却中呢喵~",
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-
-    first_results = asyncio.run(
-        collect_results(plugin, FakeEvent("色图", sender_id="20001"))
-    )
-    second_results = asyncio.run(
-        collect_results(plugin, FakeEvent("色图", sender_id="20002"))
-    )
-
-    assert first_results == [("image", "https://images.example/custom.jpg")]
-    assert second_results == [("text", "冷却中呢喵~")]
-    assert len(session.calls) == 1
-
-
-def test_should_allow_configured_administrator_during_image_cooldown() -> None:
-    """Configured administrators bypass the ordinary image cooldown."""
-    plugin, session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "admin_user_ids": ["20001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "cooldown_seconds": 60,
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-    event = FakeEvent("色图", sender_id="20001")
-
-    assert asyncio.run(collect_results(plugin, event)) == [
-        ("image", "https://images.example/custom.jpg")
-    ]
-    assert asyncio.run(collect_results(plugin, event)) == [
-        ("image", "https://images.example/custom.jpg")
-    ]
-    assert len(session.calls) == 2
 
 
 def test_should_expose_cooldown_settings_in_the_config_schema() -> None:
@@ -1627,358 +898,12 @@ def test_should_expose_cooldown_settings_in_the_config_schema() -> None:
     assert messages["cooldown_message"]["default"] == "冷却中呢喵~"
 
 
-def test_should_send_multiple_images_as_a_recallable_forward_message() -> None:
-    """Forward mode sends one OneBot chat record and recalls that record."""
-    plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "multi_image_send_mode": "forward",
-            "auto_recall": True,
-            "recall_delay_seconds": 0,
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-
-    async def run() -> tuple[list[tuple[str, str]], FakeRecallBot]:
-        event = FakeRecallEvent("来两份色图")
-        results = await collect_results(plugin, event)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        return results, event.bot
-
-    results, bot = asyncio.run(run())
-
-    assert results == []
-    assert bot.actions == [
-        (
-            "send_group_forward_msg",
-            {
-                "group_id": 10001,
-                "messages": [
-                    {
-                        "type": "node",
-                        "data": {
-                            "name": "聊天记录",
-                            "uin": 0,
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "data": {
-                                        "file": "https://images.example/custom.jpg"
-                                    },
-                                }
-                            ],
-                        },
-                    },
-                    {
-                        "type": "node",
-                        "data": {
-                            "name": "聊天记录",
-                            "uin": 0,
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "data": {
-                                        "file": "https://images.example/custom.jpg"
-                                    },
-                                }
-                            ],
-                        },
-                    },
-                ],
-            },
-        ),
-        ("delete_msg", {"message_id": 123}),
-    ]
-
-
-def test_should_not_send_images_individually_after_forward_delivery_fails() -> None:
-    """A failed forward attempt reports once without sending separate images."""
-
-    class Bot:
-        def __init__(self) -> None:
-            self.actions: list[tuple[str, dict[str, object]]] = []
-
-        async def call_action(self, action: str, **kwargs: object) -> dict[str, int]:
-            self.actions.append((action, kwargs))
-            raise RuntimeError("forward delivery failed")
-
-    class Event(FakeRecallEvent):
-        def __init__(self) -> None:
-            super().__init__("来两份色图")
-            self.bot = Bot()
-
-    plugin, _session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "multi_image_send_mode": "forward",
-            "fetching_message": "",
-            "failure_message": "图片获取失败，请稍后重试。",
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-    event = Event()
-
-    results = asyncio.run(collect_results(plugin, event))
-
-    assert results == [("text", "图片获取失败，请稍后重试。")]
-    assert [action for action, _payload in event.bot.actions] == [
-        "send_group_forward_msg"
-    ]
-
-
-def test_should_send_single_image_as_a_forward_chat_record_when_enabled() -> None:
-    """The single-image switch sends one image through OneBot chat records."""
-    plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "fetching_message": "正在获取喵~",
-            "single_image_forward": True,
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-
-    event = FakeRecallEvent("色图")
-    results = asyncio.run(collect_results(plugin, event))
-
-    assert results == [("text", "正在获取喵~")]
-    assert event.bot.actions == [
-        (
-            "send_group_forward_msg",
-            {
-                "group_id": 10001,
-                "messages": [
-                    {
-                        "type": "node",
-                        "data": {
-                            "name": "聊天记录",
-                            "uin": 0,
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "data": {
-                                        "file": "https://images.example/custom.jpg"
-                                    },
-                                }
-                            ],
-                        },
-                    }
-                ],
-            },
-        )
-    ]
-
-
-def test_should_put_pixiv_pid_inside_single_image_forward_record(
-    tmp_path: Path,
-) -> None:
-    """A single forwarded image puts its Pixiv PID before the image."""
-    plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "lolicon",
-            "lolicon_image_size": "small",
-            "show_pixiv_pid": True,
-            "single_image_forward": True,
-            "fetching_message": "正在获取喵~",
-        },
-        {
-            "error": "",
-            "data": [
-                {
-                    "pid": 100320820,
-                    "urls": {"small": "https://images.example/one.jpg"},
-                }
-            ],
-        },
-    )
-
-    event = FakeRecallEvent("色图")
-    with stub_temp_dir(tmp_path):
-        results = asyncio.run(collect_results(plugin, event))
-
-    assert results == [("text", "正在获取喵~")]
-    assert event.bot.actions == [
-        (
-            "send_group_forward_msg",
-            {
-                "group_id": 10001,
-                "messages": [
-                    {
-                        "type": "node",
-                        "data": {
-                            "name": "聊天记录",
-                            "uin": 0,
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "data": {"text": "Pixiv PID: 100320820"},
-                                },
-                                {
-                                    "type": "image",
-                                    "data": {"file": "base64://aW1hZ2UtYnl0ZXM="},
-                                },
-                            ],
-                        },
-                    }
-                ],
-            },
-        )
-    ]
-
-
-def test_should_put_each_pixiv_pid_inside_multi_image_forward_record(
-    tmp_path: Path,
-) -> None:
-    """Each forwarded image node begins with its matching Pixiv PID."""
-    plugin, _session = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "lolicon",
-            "lolicon_image_size": "small",
-            "show_pixiv_pid": True,
-            "multi_image_send_mode": "forward",
-            "fetching_message": "正在获取喵~",
-        },
-        {
-            "error": "",
-            "data": [
-                {
-                    "pid": 100,
-                    "urls": {"small": "https://images.example/one.jpg"},
-                },
-                {
-                    "pid": 200,
-                    "urls": {"small": "https://images.example/two.jpg"},
-                },
-            ],
-        },
-    )
-
-    event = FakeRecallEvent("来两份色图")
-    with stub_temp_dir(tmp_path):
-        results = asyncio.run(collect_results(plugin, event))
-
-    assert results == [("text", "正在获取喵~")]
-    action, payload = event.bot.actions[0]
-    assert action == "send_group_forward_msg"
-    assert [node["data"]["content"] for node in payload["messages"]] == [
-        [
-            {"type": "text", "data": {"text": "Pixiv PID: 100"}},
-            {"type": "image", "data": {"file": "base64://aW1hZ2UtYnl0ZXM="}},
-        ],
-        [
-            {"type": "text", "data": {"text": "Pixiv PID: 200"}},
-            {"type": "image", "data": {"file": "base64://aW1hZ2UtYnl0ZXM="}},
-        ],
-    ]
-
-
-def test_should_expose_multi_image_send_mode_in_delivery_settings() -> None:
-    """The delivery card allows direct or merged multi-image sending."""
-    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-    setting = schema["delivery_settings"]["items"]["multi_image_send_mode"]
-
-    assert setting["options"] == ["direct", "forward"]
-    assert setting["default"] == "direct"
-
-
-def test_should_expose_single_image_forward_switch_in_delivery_settings() -> None:
-    """The delivery card exposes the optional single-image chat-record switch."""
-    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-    setting = schema["delivery_settings"]["items"]["single_image_forward"]
-
-    assert setting["type"] == "bool"
-    assert setting["default"] is False
-
-
-def test_should_stop_other_handlers_only_for_matched_plugin_requests() -> None:
-    """Matched requests suppress other responders without consuming normal chat."""
-    plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "block_other_handlers": True,
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-    matched = FakeEvent("色图")
-    unmatched = FakeEvent("普通聊天")
-
-    matched_results = asyncio.run(collect_results(plugin, matched))
-    unmatched_results = asyncio.run(collect_results(plugin, unmatched))
-
-    assert matched.stopped is True
-    assert matched_results == [("image", "https://images.example/custom.jpg")]
-    assert unmatched.stopped is False
-    assert unmatched_results == []
-
-
 def test_should_expose_other_handler_blocking_in_trigger_settings() -> None:
     """The trigger card exposes the active-reply suppression switch."""
     schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
     setting = schema["trigger_settings"]["items"]["block_other_handlers"]
 
     assert setting["default"] is True
-
-
-def test_should_stop_propagation_only_after_plugin_results_are_yielded() -> None:
-    """Stopping other handlers must not suppress this plugin's own results."""
-    plugin, _ = make_plugin(
-        {
-            "enable_group": True,
-            "allowed_group_ids": ["10001"],
-            "keywords": ["色图"],
-            "image_source": "custom",
-            "custom_api_url": "https://api.example/image",
-            "custom_api_image_url_path": "url",
-            "fetching_message": "正在获取喵~",
-            "block_other_handlers": True,
-        },
-        {"url": "https://images.example/custom.jpg"},
-    )
-
-    async def run() -> tuple[list[tuple[str, str]], list[bool], bool]:
-        event = FakeEvent("色图")
-        generator = plugin.on_message(event)
-        results = []
-        stopped_during_results = []
-        async for result in generator:
-            results.append(result)
-            stopped_during_results.append(event.stopped)
-        return results, stopped_during_results, event.stopped
-
-    results, stopped_during_results, stopped_after_completion = asyncio.run(run())
-
-    assert results == [
-        ("text", "正在获取喵~"),
-        ("image", "https://images.example/custom.jpg"),
-    ]
-    assert stopped_during_results == [False, False]
-    assert stopped_after_completion is True
 
 
 JABLE_LIST_MARKDOWN = """
@@ -2334,6 +1259,7 @@ def test_should_send_jable_ranges_as_one_forward_chat_record() -> None:
             "fetching_message": "正在获取喵~",
             "block_other_handlers": True,
             "auto_recall": False,
+            "use_forward": True,
             "jable_show_detail_link": False,
         },
         None,
@@ -2363,8 +1289,9 @@ def test_should_send_jable_ranges_as_one_forward_chat_record() -> None:
 
     results = asyncio.run(run())
 
-    assert results == [("text", "正在获取喵~")]
-    action, payload = event.bot.actions[0]
+    assert results == []
+    assert event.bot.actions[0][0] == "send_group_forward_msg"
+    action, payload = event.bot.actions[1]
     assert action == "send_group_forward_msg"
     assert len(payload["messages"]) == 3
     assert all(len(node["data"]["content"]) == 2 for node in payload["messages"])
@@ -2456,9 +1383,7 @@ def test_should_bound_the_whole_jable_range_to_sixty_seconds() -> None:
 
     MODULE.asyncio.wait = tracking_wait
     try:
-        asyncio.run(
-            anext(plugin._handle_jable_command(event, event.message), None)
-        )
+        asyncio.run(anext(plugin._handle_jable_command(event, event.message), None))
     finally:
         MODULE.asyncio.wait = original_wait
 
@@ -2551,14 +1476,14 @@ def test_should_bound_jable_detail_timeout_and_retries() -> None:
     MODULE.asyncio.sleep = no_sleep
     try:
         video = asyncio.run(
-            plugin._fetch_jable_video(
-                ("https://jable.tv/latest-updates/", 1, "新片")
-            )
+            plugin._fetch_jable_video(("https://jable.tv/latest-updates/", 1, "新片"))
         )
     finally:
         MODULE.asyncio.sleep = original_sleep
 
-    detail_timeouts = [total for url, total in plugin._session.timeouts if url == detail_url]
+    detail_timeouts = [
+        total for url, total in plugin._session.timeouts if url == detail_url
+    ]
     assert video["tags"] == ["详情暂不可用"]
     assert detail_timeouts == [10, 10]
 
@@ -2632,6 +1557,7 @@ def test_should_expose_jable_settings_in_a_separate_config_card() -> None:
     assert schema["jable_settings"]["description"] == "【Jable 影片查询】"
     settings = schema["jable_settings"]["items"]
     assert set(settings) == {
+        "enable_jable",
         "jable_show_cover",
         "jable_show_code",
         "jable_show_title",
@@ -3360,9 +2286,7 @@ def test_should_fall_back_to_untagged_lolicon_when_tags_have_no_results(
     plugin._session = Session()
 
     with stub_temp_dir(tmp_path):
-        paths, pids = asyncio.run(
-            plugin._fetch_lolicon_images(1, ["不存在的标签"])
-        )
+        paths, pids = asyncio.run(plugin._fetch_lolicon_images(1, ["不存在的标签"]))
 
     assert pids == ["1"]
     assert len(paths) == 1
@@ -3370,3 +2294,549 @@ def test_should_fall_back_to_untagged_lolicon_when_tags_have_no_results(
     assert len(plugin._session.posts) == 2
     assert plugin._session.posts[0]["tag"] == [["不存在的标签"]]
     assert "tag" not in plugin._session.posts[1]
+
+
+def test_should_forward_help_text_when_global_forward_is_enabled() -> None:
+    """全局聊天记录开关应覆盖纯文本帮助消息。"""
+    plugin, _ = make_plugin({"use_forward": True, "auto_recall": False}, None)
+    event = FakeRecallEvent("/helpav")
+
+    async def run() -> list[object]:
+        return [result async for result in plugin.helpav(event)]
+
+    results = asyncio.run(run())
+
+    assert results == []
+    action, payload = event.bot.actions[0]
+    assert action == "send_group_forward_msg"
+    content = payload["messages"][0]["data"]["content"]
+    assert content[0]["type"] == "text"
+    assert "R18 图片与本子查询总帮助" in content[0]["data"]["text"]
+
+
+def test_should_auto_recall_plain_text_sent_by_the_plugin(tmp_path: Path) -> None:
+    """自动撤回应覆盖插件主动发送的纯文本。"""
+    plugin, _ = make_plugin(
+        {"use_forward": False, "auto_recall": True, "recall_delay_seconds": 0},
+        None,
+    )
+    plugin._recall_tasks_path = tmp_path / "recall_tasks.json"
+    plugin._recall_tasks = set()
+    plugin._active_recall_ids = set()
+    event = FakeRecallEvent("/helpav")
+
+    async def run() -> list[object]:
+        results = [result async for result in plugin.helpav(event)]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return results
+
+    results = asyncio.run(run())
+
+    assert results == []
+    assert event.bot.actions[0][0] == "send_group_msg"
+    assert event.bot.actions[-1] == ("delete_msg", {"message_id": 123})
+
+
+def test_should_forward_jm_zip_when_global_forward_is_enabled(tmp_path: Path) -> None:
+    """全局聊天记录开关应覆盖 JM 下载文件。"""
+    archive = tmp_path / "album.zip"
+    archive.write_bytes(b"zip")
+    plugin, _ = make_plugin({"use_forward": True, "auto_recall": False}, None)
+    event = FakeRecallEvent("/jm 下载 1")
+
+    sent = asyncio.run(plugin._send_file_with_auto_recall(event, archive, "完成"))
+
+    assert sent is True
+    action, payload = event.bot.actions[0]
+    assert action == "send_group_forward_msg"
+    content = payload["messages"][0]["data"]["content"]
+    assert [segment["type"] for segment in content] == ["text", "file"]
+
+
+def test_should_fall_back_to_plain_text_when_forward_delivery_fails() -> None:
+    """聊天记录接口失败时应回退普通 AstrBot 文本结果。"""
+
+    class FailingForwardBot(FakeRecallBot):
+        async def call_action(
+            self, action: str, **kwargs: object
+        ) -> dict[str, int] | None:
+            self.actions.append((action, kwargs))
+            if action.endswith("forward_msg"):
+                raise RuntimeError("forward unavailable")
+            return {"message_id": 123} if action.startswith("send_") else None
+
+    plugin, _ = make_plugin({"use_forward": True, "auto_recall": False}, None)
+    event = FakeRecallEvent("/helpav")
+    event.bot = FailingForwardBot()
+
+    async def run() -> list[object]:
+        return [result async for result in plugin.helpav(event)]
+
+    results = asyncio.run(run())
+
+    assert len(results) == 1
+    assert results[0][0] == "text"
+    assert "R18 图片与本子查询总帮助" in results[0][1]
+    assert event.bot.actions[0][0] == "send_group_forward_msg"
+
+
+def test_should_disable_each_optional_content_feature() -> None:
+    """Lolicon、Jable、JM 三个开关应阻止对应网络功能。"""
+    image_plugin, image_session = make_plugin(
+        {
+            "enable_group": True,
+            "allowed_group_ids": ["10001"],
+            "keywords": ["色图"],
+            "image_source": "lolicon",
+            "enable_lolicon": False,
+            "fetching_message": "",
+        },
+        None,
+    )
+    jable_plugin, _ = make_plugin({"enable_group": True, "enable_jable": False}, None)
+    jm_plugin, _ = make_plugin({"enable_group": True, "enable_jm": False}, None)
+
+    image_results = asyncio.run(collect_results(image_plugin, FakeEvent("色图")))
+
+    async def collect_jable() -> list[object]:
+        return [
+            result
+            async for result in jable_plugin._handle_jable_command(
+                FakeEvent("/av 热门 今日 1"), "/av 热门 今日 1"
+            )
+        ]
+
+    async def collect_jm() -> list[object]:
+        return [
+            result
+            async for result in jm_plugin._handle_jm_action(
+                FakeEvent("/jm 详情 1"), "info", "1"
+            )
+        ]
+
+    assert image_results == [
+        ("text", "所有图片来源均已关闭，请至少启用 Lolicon 或配置 Wallhaven。")
+    ]
+    assert image_session.calls == []
+    assert asyncio.run(collect_jable()) == [("text", "Jable 影片查询已关闭。")]
+    assert asyncio.run(collect_jm()) == [("text", "JM 本子功能已关闭。")]
+
+
+def test_should_clamp_recall_delay_to_two_minutes() -> None:
+    """撤回延迟必须始终处于两分钟以内。"""
+    plugin, _ = make_plugin({"recall_delay_seconds": 999}, None)
+    assert plugin._recall_delay_seconds() == 120.0
+    plugin._config["recall_delay_seconds"] = -1
+    assert plugin._recall_delay_seconds() == 0.0
+
+
+def test_should_recall_delivery_failure_notification(tmp_path: Path) -> None:
+    """图片发送失败后的插件提示也必须进入自动撤回链路。"""
+
+    class ImageFailingBot(FakeRecallBot):
+        async def call_action(
+            self, action: str, **kwargs: object
+        ) -> dict[str, int] | None:
+            self.actions.append((action, kwargs))
+            if len(self.actions) == 1:
+                raise RuntimeError("image failed")
+            if action.startswith("send_"):
+                return {"message_id": 456}
+            return None
+
+    plugin, _ = make_plugin(
+        {"auto_recall": True, "recall_delay_seconds": 0, "use_forward": False},
+        None,
+    )
+    plugin._recall_tasks_path = tmp_path / "recall_tasks.json"
+    plugin._recall_tasks = set()
+    plugin._active_recall_ids = set()
+    event = FakeRecallEvent("色图")
+    event.bot = ImageFailingBot()
+
+    async def run() -> bool | None:
+        status = await plugin._send_image_with_auto_recall(
+            event,
+            "https://images.example/fail.jpg",
+            failure_message="图片发送失败。",
+            prepared=("image", "https://images.example/fail.jpg"),
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return status
+
+    status = asyncio.run(run())
+
+    assert status is False
+    assert event.bot.actions[1][1]["message"][0]["data"]["text"] == "图片发送失败。"
+    assert event.bot.actions[-1] == ("delete_msg", {"message_id": 456})
+
+
+def make_wallhaven_plugin(
+    overrides: dict[str, object] | None = None,
+    urls: list[str] | None = None,
+) -> tuple[object, FakeSession]:
+    """创建只使用当前 Wallhaven 图片源的测试插件。"""
+    config: dict[str, object] = {
+        "enable_group": True,
+        "allowed_group_ids": ["10001"],
+        "keywords": ["色图"],
+        "keyword_match_mode": "exact",
+        "image_source": "wallhaven",
+        "wallhaven_api_key": "test-key",
+        "wallhaven_categories": ["动漫"],
+        "wallhaven_purity": ["全年龄"],
+        "fetching_message": "",
+    }
+    config.update(overrides or {})
+    image_urls = urls or ["https://images.example/current.jpg"]
+    return make_plugin(config, {"data": [{"path": url} for url in image_urls]})
+
+
+def test_should_enforce_quantity_access_and_keyword_rules() -> None:
+    """当前图片源仍应复用数量、会话白名单和关键词规则。"""
+    plugin, session = make_wallhaven_plugin()
+    assert asyncio.run(collect_results(plugin, FakeEvent("来6张色图"))) == [
+        ("text", "单次最多获取 5 张图片。")
+    ]
+    assert session.calls == []
+
+    cases = [
+        ("exact", "色图", "10001", False, True),
+        ("exact", "来张色图", "10001", False, False),
+        ("prefix", "色图 来一张", "10001", False, True),
+        ("contains", "请来张色图", "10001", False, True),
+        ("exact", "色图", "99999", False, False),
+    ]
+    for mode, message, group_id, private, should_reply in cases:
+        candidate, candidate_session = make_wallhaven_plugin(
+            {"keyword_match_mode": mode}
+        )
+        results = asyncio.run(
+            collect_results(candidate, FakeEvent(message, group_id, private))
+        )
+        assert bool(results) is should_reply
+        assert bool(candidate_session.calls) is should_reply
+
+
+def test_should_enforce_private_allowlist_with_current_image_source() -> None:
+    """私聊总开关和用户白名单不依赖已删除的图片源。"""
+    cases = [
+        ([], "20001", True),
+        (["20001", 20002], "20002", True),
+        (["20001"], "29999", False),
+        ("20001", "20001", False),
+    ]
+    for allowed_users, sender_id, should_reply in cases:
+        plugin, session = make_wallhaven_plugin(
+            {
+                "enable_group": False,
+                "enable_private": True,
+                "allowed_private_user_ids": allowed_users,
+            }
+        )
+        results = asyncio.run(
+            collect_results(
+                plugin,
+                FakeEvent("色图", group_id="", private=True, sender_id=sender_id),
+            )
+        )
+        assert bool(results) is should_reply
+        assert bool(session.calls) is should_reply
+
+
+def test_should_pass_parsed_tags_to_wallhaven() -> None:
+    """请求语法应被消费，剩余内容作为当前图片源标签。"""
+    cases = [
+        ("来个色图", None),
+        ("请给我来一张色图", None),
+        ("发我一张色图", None),
+        ("来个白丝色图", "白丝"),
+        ("给我发一张白丝、猫耳色图", "白丝 猫耳"),
+        ("色图 白丝 猫耳", "白丝 猫耳"),
+    ]
+    for message, expected_query in cases:
+        plugin, session = make_wallhaven_plugin({"keyword_match_mode": "contains"})
+        results = asyncio.run(collect_results(plugin, FakeEvent(message)))
+        assert results == [("image", "https://images.example/current.jpg")]
+        params = session.calls[0][1]
+        assert params is not None
+        assert params.get("q") == expected_query
+
+
+def test_should_merge_nested_configuration_cards() -> None:
+    """WebUI 分组配置应继续合并为运行时扁平配置。"""
+    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+    expected_groups = {
+        "access_settings",
+        "trigger_settings",
+        "delivery_settings",
+        "message_settings",
+        "source_settings",
+        "lolicon_settings",
+        "jable_settings",
+        "jm_settings",
+        "wallhaven_settings",
+    }
+    assert set(schema) == expected_groups
+    assert all(section["type"] == "object" for section in schema.values())
+
+    plugin = CrimsonCosmosPlugin(
+        None,
+        {
+            "access_settings": {"enable_group": True},
+            "delivery_settings": {"use_forward": True},
+            "lolicon_settings": {"enable_lolicon": False},
+            "jable_settings": {"enable_jable": False},
+            "jm_settings": {"enable_jm": False},
+        },
+    )
+    assert plugin._config["enable_group"] is True
+    assert plugin._config["use_forward"] is True
+    assert plugin._config["enable_lolicon"] is False
+    assert plugin._config["enable_jable"] is False
+    assert plugin._config["enable_jm"] is False
+
+
+def test_should_send_prompts_and_apply_shared_cooldown() -> None:
+    """获取提示、失败提示、群共享冷却与管理员绕过应保持有效。"""
+    plugin, session = make_wallhaven_plugin(
+        {
+            "fetching_message": "正在获取喵~",
+            "cooldown_seconds": 60,
+            "cooldown_message": "冷却中呢喵~",
+        }
+    )
+    first = asyncio.run(collect_results(plugin, FakeEvent("色图", sender_id="20001")))
+    second = asyncio.run(collect_results(plugin, FakeEvent("色图", sender_id="20002")))
+    assert first == [
+        ("text", "正在获取喵~"),
+        ("image", "https://images.example/current.jpg"),
+    ]
+    assert second == [("text", "冷却中呢喵~")]
+    assert len(session.calls) == 1
+
+    administrator, administrator_session = make_wallhaven_plugin(
+        {"admin_user_ids": ["20001"], "cooldown_seconds": 60}
+    )
+    event = FakeEvent("色图", sender_id="20001")
+    asyncio.run(collect_results(administrator, event))
+    asyncio.run(collect_results(administrator, event))
+    assert len(administrator_session.calls) == 2
+
+
+def test_should_report_exhausted_current_source_failure() -> None:
+    """当前图片源失败时应发送可配置失败提示。"""
+    plugin, _ = make_wallhaven_plugin(
+        {"fetching_message": "正在获取喵~", "failure_message": "获取失败。"}
+    )
+    plugin._session.payload = {"unexpected": True}
+
+    results = asyncio.run(collect_results(plugin, FakeEvent("色图")))
+
+    assert results == [("text", "正在获取喵~"), ("text", "获取失败。")]
+
+
+def test_should_forward_and_recall_multiple_current_source_images(
+    tmp_path: Path,
+) -> None:
+    """全局开关应合并转发并撤回多张当前来源图片。"""
+    plugin, _ = make_wallhaven_plugin(
+        {
+            "use_forward": True,
+            "auto_recall": True,
+            "recall_delay_seconds": 0,
+        },
+        ["https://images.example/one.jpg", "https://images.example/two.jpg"],
+    )
+    plugin._recall_tasks_path = tmp_path / "recall_tasks.json"
+    plugin._recall_tasks = set()
+    plugin._active_recall_ids = set()
+
+    async def run() -> tuple[list[object], FakeRecallBot]:
+        event = FakeRecallEvent("来两份色图")
+        results = await collect_results(plugin, event)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return results, event.bot
+
+    results, bot = asyncio.run(run())
+    assert results == []
+    assert bot.actions[0][0] == "send_group_forward_msg"
+    assert len(bot.actions[0][1]["messages"]) == 2
+    assert bot.actions[-1] == ("delete_msg", {"message_id": 123})
+
+
+def test_should_restore_persisted_recall_after_reload(tmp_path: Path) -> None:
+    """待撤回消息应在插件重新加载后继续执行。"""
+    task_file = tmp_path / "recall_tasks.json"
+    plugin, _ = make_wallhaven_plugin({"auto_recall": True, "recall_delay_seconds": 60})
+    plugin._recall_tasks_path = task_file
+    plugin._recall_tasks = set()
+    plugin._active_recall_ids = set()
+
+    async def schedule_and_stop() -> None:
+        await collect_results(plugin, FakeRecallEvent("色图"))
+        await plugin.terminate()
+
+    asyncio.run(schedule_and_stop())
+    records = json.loads(task_file.read_text(encoding="utf-8"))
+    records[0]["due_at"] = 0
+    task_file.write_text(json.dumps(records), encoding="utf-8")
+
+    restored, _ = make_wallhaven_plugin()
+    restored._recall_tasks_path = task_file
+    restored._recall_tasks = set()
+    restored._active_recall_ids = set()
+
+    async def restore() -> FakeRecallBot:
+        event = FakeRecallEvent("普通聊天")
+        await collect_results(restored, event)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return event.bot
+
+    bot = asyncio.run(restore())
+    assert bot.actions == [("delete_msg", {"message_id": 123})]
+    assert json.loads(task_file.read_text(encoding="utf-8")) == []
+
+
+def test_should_only_stop_other_handlers_for_matched_requests() -> None:
+    """仅匹配本插件请求时停止后续处理器。"""
+    plugin, _ = make_wallhaven_plugin({"block_other_handlers": True})
+    matched = FakeEvent("色图")
+    unmatched = FakeEvent("普通聊天")
+
+    matched_results = asyncio.run(collect_results(plugin, matched))
+    unmatched_results = asyncio.run(collect_results(plugin, unmatched))
+
+    assert matched.stopped is True
+    assert matched_results == [("image", "https://images.example/current.jpg")]
+    assert unmatched.stopped is False
+    assert unmatched_results == []
+
+
+def test_should_validate_and_dispatch_all_jm_command_wrappers() -> None:
+    """JM 指令包装层应校验参数并把合法请求交给统一处理器。"""
+    plugin, _ = make_plugin({"enable_group": True}, None)
+    event = FakeEvent("/jm")
+
+    async def collect(generator: object) -> list[object]:
+        return [result async for result in generator]
+
+    assert asyncio.run(collect(plugin.jm_search(event, "", 1))) == [
+        ("text", "用法：/jm 搜索 <关键词> [页码]")
+    ]
+    assert asyncio.run(collect(plugin.jm_search(event, "测试", "bad"))) == [
+        ("text", "用法：/jm 搜索 <关键词> [页码]")
+    ]
+    assert asyncio.run(collect(plugin.jm_info(event, "abc"))) == [
+        ("text", "用法：/jm 详情 <数字ID>")
+    ]
+    assert asyncio.run(collect(plugin.jm_hot(event, "未知", 1))) == [
+        ("text", "用法：/jm 热门 [日|周|月] [页码]")
+    ]
+    assert asyncio.run(collect(plugin.jm_hot(event, "周", "bad"))) == [
+        ("text", "用法：/jm 热门 [日|周|月] [页码]")
+    ]
+    assert asyncio.run(collect(plugin.jm_download(event, "abc"))) == [
+        ("text", "用法：/jm 下载 <数字ID>")
+    ]
+
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def handle(
+        _event: FakeEvent, action: str, *args: object
+    ) -> AsyncGenerator[object, None]:
+        calls.append((action, args))
+        yield ("handled", action)
+
+    plugin._handle_jm_action = handle
+    assert asyncio.run(collect(plugin.jm_search(event, "测试", 2))) == [
+        ("handled", "search")
+    ]
+    assert asyncio.run(collect(plugin.jm_info(event, "00123"))) == [("handled", "info")]
+    assert asyncio.run(collect(plugin.jm_hot(event, "今日", 2))) == [("handled", "hot")]
+    assert asyncio.run(collect(plugin.jm_download(event, "00123"))) == [
+        ("handled", "download")
+    ]
+    assert calls == [
+        ("search", ("测试", 2)),
+        ("info", ("00123",)),
+        ("hot", ("day", 2)),
+        ("download", ("00123",)),
+    ]
+
+
+def test_should_dispatch_all_av_command_wrappers() -> None:
+    """AV 子命令应构造统一且可解析的内部命令文本。"""
+    plugin, _ = make_plugin({}, None)
+    event = FakeEvent("/av")
+    calls: list[str] = []
+
+    async def handle(_event: FakeEvent, message: str) -> AsyncGenerator[object, None]:
+        calls.append(message)
+        yield ("handled", message)
+
+    plugin._handle_jable_command = handle
+
+    async def collect(generator: object) -> list[object]:
+        return [result async for result in generator]
+
+    asyncio.run(collect(plugin.av_hot(event, "今日", "1")))
+    asyncio.run(collect(plugin.av_new(event, "2")))
+    asyncio.run(collect(plugin.av_theme(event, "黑丝", "最高收藏", "3")))
+    asyncio.run(collect(plugin.av_model(event, "测试女优", "最近更新", "4")))
+    assert calls == [
+        "/av 热门 今日 1",
+        "/av 新片 2",
+        "/av 主题 黑丝 最高收藏 3",
+        "/av 女优 测试女优 最近更新 4",
+    ]
+
+
+def test_should_use_private_forward_and_fall_back_for_invalid_target() -> None:
+    """统一文本发送应支持私聊，并在目标 ID 无效时回退普通结果。"""
+    plugin, _ = make_plugin({"use_forward": True, "auto_recall": False}, None)
+    private_event = FakeRecallEvent("/helpav")
+    private_event.private = True
+    private_event.group_id = ""
+    private_event.sender_id = "20001"
+
+    async def collect(event: FakeEvent) -> list[object]:
+        return [result async for result in plugin.helpav(event)]
+
+    assert asyncio.run(collect(private_event)) == []
+    assert private_event.bot.actions[0][0] == "send_private_forward_msg"
+    assert private_event.bot.actions[0][1]["user_id"] == 20001
+
+    invalid_event = FakeRecallEvent("/helpav")
+    invalid_event.group_id = "invalid"
+    fallback = asyncio.run(collect(invalid_event))
+    assert len(fallback) == 1
+    assert fallback[0][0] == "text"
+    assert invalid_event.bot.actions == []
+
+
+def test_should_initialize_session_and_cover_noop_entry_paths() -> None:
+    """会话工厂、指令组入口和空消息路径应可安全执行。"""
+    plugin, _ = make_plugin(
+        {
+            "enable_group": True,
+            "allowed_group_ids": [],
+            "keywords": ["色图"],
+        },
+        None,
+    )
+
+    async def run() -> list[object]:
+        session = plugin._make_session()
+        assert session.closed is False
+        await session.close()
+        return await collect_results(plugin, FakeEvent(""))
+
+    assert asyncio.run(run()) == []
+    assert plugin._is_event_allowed(FakeEvent("色图")) is True
+    plugin._config["allowed_group_ids"] = "10001"
+    assert plugin._is_event_allowed(FakeEvent("色图")) is False
